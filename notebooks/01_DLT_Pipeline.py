@@ -314,8 +314,11 @@ def silver_invoice_extractions():
         "invoice_id", "file_path", "file_size_bytes",
         F.col("fields.invoice_number").alias("extracted_invoice_number"),
         F.col("fields.vendor_name").alias("extracted_vendor_name"),
-        # GSTIN has a fixed 15-character format; when ai_extract returns nothing, read it from the parsed text
-        F.coalesce(F.when(F.trim(F.col("fields.vendor_gstin")) != "", F.trim(F.col("fields.vendor_gstin"))),
+        # Guardrail: GSTIN has a fixed 15-character format. Keep the AI value only when it is a valid GSTIN
+        # (the model otherwise invents one for foreign vendors whose PDFs print none); fall back to the
+        # pattern in the parsed text.
+        F.coalesce(F.when(F.upper(F.regexp_replace(F.col("fields.vendor_gstin"), r"[^A-Za-z0-9]", "")).rlike("^" + GSTIN_PATTERN + "$"),
+                          F.upper(F.regexp_replace(F.col("fields.vendor_gstin"), r"[^A-Za-z0-9]", ""))),
                    F.when(F.regexp_extract("document_text", GSTIN_PATTERN, 1) != "",
                           F.regexp_extract("document_text", GSTIN_PATTERN, 1))).alias("extracted_gstin"),
         F.to_date(F.col("fields.invoice_date"), "dd-MMM-yyyy").alias("extracted_invoice_date"),
