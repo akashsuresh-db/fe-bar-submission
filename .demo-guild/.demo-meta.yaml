@@ -2,11 +2,11 @@ name: finance-ops-control-tower
 title: Finance Operations Control Tower
 tagline: One Unified View of P2P, R2R & OTC Operations
 description: An end-to-end Finance & Accounting demo on Databricks covering Procure-to-Pay,
-  Order-to-Cash, and Record-to-Report workflows. It ingests ERP data through a medallion
-  lakehouse pipeline, applies AI-powered invoice extraction and 3-way matching, and
-  surfaces results in a real-time React/FastAPI app with a multi-agent conversational
-  AI sidebar. The demo quantifies outcomes like 75–85% invoice processing cost reduction
-  and 50–70% faster month-end close.
+  Order-to-Cash and Record-to-Report. A Lakeflow declarative pipeline ingests synthetic ERP
+  extracts and invoice PDFs, AI Functions read every PDF and block release when it disagrees
+  with the ERP, the GL reconciles to the sub-ledgers with explained items, Unity Catalog applies
+  row filters and masks, Lakebase serves the AP queue, and a Databricks App with a Genie Agent
+  chat surfaces it. Estimated value for an illustrative $1.2B firm is about $2.8M a year.
 sub_industry: proserv
 use_cases:
 - Finance Operations Automation

@@ -1,82 +1,53 @@
-# Manual Deploy — components not covered by the Asset Bundle
+# Deployment — what is automated and what is not
 
-Everything deployable ships in the Databricks Asset Bundle (`databricks.yml` +
-`resources/`): the DLT pipeline, the setup/teardown jobs, and the Databricks App.
+`setup/setup.sh` builds the whole demo from an empty schema. Nothing is created by hand.
 
-The components below **cannot** be created by a bundle today (no DAB resource type,
-or they depend on account/region features). Provision them manually, then feed the
-resulting IDs back to the app as bundle variables / app env vars.
-
----
-
-## 1. Lakebase (managed Postgres) instance
-
-Backs the app's operational state (session memory, approvals, call logs). The app
-attaches it as a `database` resource (`resources/apps.yml`), but the **instance itself**
-is created out of band.
-
-**Create** (UI: *Compute → Database instances → Create*, or CLI):
-```bash
-databricks database create-database-instance \
-  --json '{"name": "finance-ops-db", "capacity": "CU_1"}'
-```
-Then create the app database inside it (default name `finance_ops_app`).
-
-**Wire it up:** pass the instance name to the bundle if you changed it:
-```bash
-./setup/setup.sh --var="lakebase_instance_name=finance-ops-db"
-```
-`PGHOST` / `PGUSER` / `PGPASSWORD` are injected into the app automatically by the
-attached `database` resource. If the instance is absent the app runs in in-memory demo mode.
-
----
-
-## 2. Genie space
-
-Natural-language analytics over the gold tables. Genie spaces have no DAB resource type.
-
-**Create** using the notebooks in `notebooks/` (parameterized — pass `catalog`, `schema`,
-`warehouse_id` as widgets/job params):
-- `06_Genie_Space_Setup.py` — table descriptions + sample questions
-- `07_Create_Genie_Space.py` — creates the space via the SDK
-- `08_Configure_Genie_Space.py` — adds instructions + curated questions (pass `space_id`)
-
-**Wire it up:** set the resulting space ID on the app:
-```
-GENIE_SPACE_ID = <your-genie-space-id>   # app env var in app/app.yaml (or app settings)
-```
-
----
-
-## 3. MAS / AgentBricks supervisor endpoint
-
-The multi-agent chat routes through a Multi-Agent Supervisor (AgentBricks) serving
-endpoint. AgentBricks / Knowledge Assistant endpoints are not DAB-deployable.
-
-**Create** the supervisor in AgentBricks (UI), attach the Genie space above as a tool,
-and note the serving-endpoint name.
-
-**Wire it up:** set the endpoint name on the app:
-```
-MAS_ENDPOINT_NAME = <your-mas-endpoint-name>   # app env var in app/app.yaml
-```
-The app's `claude-endpoint` (foundation model) resource IS bundle-managed; only the
-custom MAS endpoint is manual.
-
----
-
-## 4. Vector Search
-
-Not used by this demo. If you add semantic search later, create the Vector Search
-endpoint + index manually (no DAB resource type) and document it here.
-
----
-
-## Post-deploy checklist
-
-| Manual asset | Feeds | App variable |
+| Component | How it is created | Where |
 |---|---|---|
-| Lakebase instance | `resources/apps.yml` database resource | `lakebase_instance_name` (bundle var) |
-| SQL warehouse (existing) | `resources/apps.yml` sql_warehouse | `warehouse_id` (bundle var) |
-| Genie space | app runtime | `GENIE_SPACE_ID` (app env) |
-| MAS endpoint | app runtime | `MAS_ENDPOINT_NAME` (app env) |
+| Lakeflow declarative pipeline (bronze → silver → gold, AI extraction) | Bundle | `resources/pipelines.yml` |
+| Setup, Lakebase write-back and teardown jobs | Bundle | `resources/jobs.yml` |
+| Lakebase instance | Bundle (`database_instances`) | `resources/lakebase.yml` |
+| Databricks App with warehouse, model endpoint and Lakebase resources, on-behalf-of-user scopes | Bundle | `resources/apps.yml` |
+| Groups, entity map, row filter, column masks, tags, grants | Setup job, `00d_Governance` | `notebooks/00d_Governance.py` |
+| Lakebase synced table `ap_exception_queue` and UC write-back tables `ops_*` | Setup job, `10_Lakebase_Sync` | `notebooks/10_Lakebase_Sync.py` |
+| Genie space | Setup job, `06_Genie_Space` (Genie validates that its tables exist, so it is created after the pipeline) | `notebooks/06_Genie_Space.py` |
+| App service-principal grants and Genie `CAN_RUN` | `setup.sh` step 4 | `setup/grant_app_access.py` |
+
+## Prerequisites
+
+- A workspace with Unity Catalog, serverless compute, Lakebase and Databricks Apps (with user authorization) enabled.
+- An existing SQL warehouse (`--var warehouse_id=<id>`).
+- A catalog you can create schemas in (`--var catalog=<catalog>`). `00a_Reset_Schema` creates the catalog only if it does not exist.
+- Workspace admin rights, so `00d_Governance` can create the workspace-local groups.
+
+## Run
+
+```bash
+./setup/setup.sh -p <profile> --var="catalog=<catalog>" --var="schema=<schema>" --var="warehouse_id=<id>"
+```
+
+Re-running is safe: the job clears the landing volumes, re-lands deterministic data and runs the pipeline with a
+full refresh.
+
+## Optional
+
+- **Agent Bricks supervisor.** Create a supervisor agent with the Genie space as a tool and pass
+  `--var="mas_endpoint_name=<endpoint>"`. Without it, the app chat sends questions to the Genie Conversation API.
+- **Lakebase write-back cadence.** Unpause `cfo-fna-control-tower-lakebase-writeback-<target>` to copy app writes to
+  Unity Catalog every 30 minutes; the setup job copies them once per run.
+
+## Known platform constraints (and the substitute used)
+
+| Constraint | Substitute |
+|---|---|
+| Registering the Lakebase database as a UC catalog needs `CREATE CATALOG` on the metastore | `10_Lakebase_Sync` copies `ap_approvals`, `ar_call_logs` and `chat_history` into `ops_*` Delta tables |
+| Account groups cannot be created from an FEVM workspace | Workspace-local groups with `is_member()` in the row filter and masks |
+| The app's database resource must exist at first deploy | The app uses the instance's default database `databricks_postgres` |
+
+## Teardown
+
+```bash
+./setup/teardown.sh -p <profile> --var="catalog=<catalog>" --var="schema=<schema>" --var="warehouse_id=<id>"
+```
+
+Drops the demo schema (not the catalog), then destroys the bundle resources.

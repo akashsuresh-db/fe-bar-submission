@@ -12,7 +12,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install psycopg2-binary --quiet
+# MAGIC %pip install "psycopg[binary]>=3.2" --quiet
 
 # COMMAND ----------
 
@@ -33,7 +33,7 @@ MODE = dbutils.widgets.get("mode")
 FQ = f"{CATALOG}.{SCHEMA}"
 
 import json, time, uuid
-import psycopg2
+import psycopg
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.database import (
     SyncedDatabaseTable, SyncedTableSpec, SyncedTableSchedulingPolicy, NewPipelineSpec)
@@ -46,8 +46,8 @@ report = {"instance": INSTANCE, "database": DATABASE, "host": inst.read_write_dn
 
 def pg(dbname):
     token = w.database.generate_database_credential(request_id=str(uuid.uuid4()), instance_names=[INSTANCE]).token
-    return psycopg2.connect(host=inst.read_write_dns, port=5432, dbname=dbname, user=me,
-                            password=token, sslmode="require")
+    return psycopg.connect(host=inst.read_write_dns, port=5432, dbname=dbname, user=me,
+                           password=token, sslmode="require", autocommit=True)
 
 # COMMAND ----------
 
@@ -57,7 +57,7 @@ def pg(dbname):
 
 SYNCED = f"{FQ}.ap_exception_queue"
 if MODE in ("all", "sync"):
-    conn = pg("databricks_postgres"); conn.autocommit = True
+    conn = pg("databricks_postgres")
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (DATABASE,))
         if not cur.fetchone():
@@ -83,7 +83,7 @@ if MODE in ("all", "sync"):
                 new_pipeline_spec=NewPipelineSpec(storage_catalog=CATALOG, storage_schema=SCHEMA))))
         action = "created"
     # Wait for the snapshot to land, then count rows in Postgres
-    rows = None
+    rows, last = None, ""
     for _ in range(60):
         try:
             conn = pg(DATABASE)
@@ -119,7 +119,9 @@ if MODE in ("all", "writeback"):
             if cur.fetchone()[0] is None:
                 copied[table] = "not created yet (app has not started)"
                 continue
-        df = pd.read_sql(f"SELECT * FROM public.{table}", conn)
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM public.{table}")
+            df = pd.DataFrame(cur.fetchall(), columns=[d.name for d in cur.description])
         target = f"{FQ}.ops_{table}"
         if len(df):
             sdf = spark.createDataFrame(df.astype(object).where(df.notna(), None))

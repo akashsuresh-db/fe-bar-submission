@@ -1,620 +1,146 @@
-# Finance Operations Intelligence — Databricks Lakehouse Demo
+# Finance Operations Control Tower on Databricks
 
-> **A production-grade, end-to-end Finance & Accounting platform on Azure Databricks** — covering Procure-to-Pay (P2P), Order-to-Cash (O2C), and Record-to-Report (R2R) with AI-powered invoice processing, a real-time operations app, and conversational analytics.
+**Customer (illustrative):** Meridian Advisory, a $1.2B professional-services firm whose India shared-services
+centre runs Procure-to-Pay (P2P), Order-to-Cash (O2C) and Record-to-Report (R2R) for two legal entities
+(`MERIDIAN-IN`, `MERIDIAN-UK`). All data in this repository is synthetic.
 
----
+## 1. Outcome first
 
-## Table of Contents
+**The problem, in the buyer's KPIs.** Finance works from last week's ERP exports and spreadsheets. Invoices are
+keyed and matched by hand (a touchless rate of about a third), duplicate and tampered invoices are found after
+payment if at all, collections teams chase from stale aging lists, and the month-end tie-out of the sub-ledgers to
+the general ledger takes days of manual reconciliation.
 
-0. [Deployment (Asset Bundle)](#0-deployment-asset-bundle)
-1. [Business Problem](#1-business-problem)
-2. [Value Proposition](#2-value-proposition)
-3. [How Databricks Solves It](#3-how-databricks-solves-it)
-4. [Platform Architecture](#4-platform-architecture)
-5. [Process Flows](#5-process-flows)
-6. [AI Layer](#6-ai-layer)
-7. [Finance Operations App](#7-finance-operations-app)
-8. [Conversational AI — Multi-Agent System](#8-conversational-ai--multi-agent-system)
-9. [Data Quality & Governance](#9-data-quality--governance)
-10. [Key Metrics](#10-key-metrics)
-11. [Tech Stack](#11-tech-stack)
-12. [Quick Reference](#12-quick-reference)
-13. [Repo Structure](#13-repo-structure)
-14. [Demo Walkthrough](#14-demo-walkthrough)
+**The value case (estimated).** About **$2.8M a year** across four levers, plus **$16M of cash released** by a
+5-day DSO reduction, about **11x** the estimated platform cost of $0.25M a year.
 
----
+| Lever | Sizing basis (estimate) | Annual value |
+|---|---|---|
+| Working capital carry | A 5-day DSO cut on $1.2B revenue releases $16M, carried at 8% cost of capital | $1.3M |
+| AP processing cost | 120K invoices a year, from $9.40 to $3.50 each at 70% touchless | $0.7M |
+| Payment leakage blocked | Duplicates and overpayments at 0.1% of $480M vendor spend | $0.5M |
+| Close effort | Three fewer close days a month for a 25-person finance team | $0.3M |
+| **Total** | Platform cost estimated at $0.25M a year at pilot scale | **$2.8M (11x)** |
 
-## 0. Deployment (Asset Bundle)
+Invoice cost benchmark: Ardent Partners ePayables. All inputs are illustrative estimates for this customer profile.
 
-Every deployable component ships as a **Databricks Asset Bundle** (`databricks.yml` +
-`resources/`). Nothing is hardcoded — the workspace host comes from your CLI profile or
-`DATABRICKS_HOST`, and catalog / schema / warehouse are bundle variables.
+**Proven on the build** (live results, `evidence/kpi_queries.md`):
+
+| Result | Value |
+|---|---|
+| Touchless rate (clean three-way match, not release-blocked) | ⟦touchless⟧ |
+| Duplicate invoices blocked before payment | ⟦dups⟧ |
+| Value held for review in the exception queue | ⟦held⟧ |
+| Tampered invoice PDFs caught by the AI control | ⟦tamper⟧ |
+| AI extraction accuracy (total / PO / GSTIN) | ⟦accuracy⟧ |
+| Sub-ledger to GL reconciliation | ⟦recon⟧ |
+| Trial balance | Balances in every period (DR = CR) |
+
+## 2. Architecture
+
+```
+raw_csv/ + raw_invoices/ (UC volumes)
+   │  Auto Loader
+   ▼
+Lakeflow declarative pipeline ── bronze_* ── silver_* (expectations, dedup, ai_parse_document + ai_extract,
+   │                                                   release_blocked) ── gold_* (facts, trial balance, recon)
+   ▼
+Unity Catalog: grants · row filter on legal_entity · masks on bank details/GSTIN · tags · lineage
+   │
+   ├── MLflow evaluation of the AI extraction (notebook 09)
+   ├── Genie Agent over the governed tables (notebook 06)
+   ├── Lakebase synced table ap_exception_queue (notebook 10) ◀── app reads the AP queue at OLTP latency
+   ▼
+Databricks App (FastAPI + React): KPIs, AP/AR/GL workbenches, Genie chat, approvals and call logs
+   │  writes approvals, call logs, chat to Lakebase
+   ▼
+Lakebase → Unity Catalog write-back (ops_* tables), queryable by Genie
+```
+
+| Stage | Product | Main tables / objects | Evidence |
+|---|---|---|---|
+| Ingest | Lakeflow declarative pipeline, Auto Loader | `bronze_*` (17 streaming tables) | `evidence/F4_job_runs.md`, `evidence/pipeline_event_log.md` |
+| Transform and quality | Lakeflow expectations, quarantine tables | `silver_p2p_invoices`, `silver_invoice_exceptions`, `silver_duplicate_invoices`, `silver_je_quarantine` | `evidence/pipeline_event_log.md` |
+| Intelligence | AI Functions in the pipeline, MLflow | `silver_invoice_extractions`, `gold_ai_extraction_eval` | `evidence/ai_eval.md` |
+| Business layer | Lakeflow materialized views | `gold_fact_*`, `gold_recon_*` | `evidence/F1_recon.md`, `evidence/kpi_queries.md` |
+| Governance | Unity Catalog | grants, `rf_legal_entity`, `mask_bank_account`, `mask_gstin`, tags | `evidence/F8_governance.md`, `evidence/lineage.md` |
+| Operational serving | Lakebase synced table and app tables | `ap_exception_queue`, `ap_approvals`, `ar_call_logs`, `chat_history` | `evidence/lakebase.md` |
+| Natural language | Genie Agent, Conversation API | Genie space "Finance Operations Control Tower" | `evidence/genie_transcripts.md` |
+| Application | Databricks Apps (on-behalf-of-user) | `cfo-fna-control-tower-dev` | `evidence/app_api_responses.md`, `evidence/tests.md` |
+
+## 3. Decisions and trade-offs
+
+| Decision | Chosen | Alternative | Why |
+|---|---|---|---|
+| AI extraction placement | `ai_parse_document` + `ai_extract` inside the pipeline as a streaming table | Separate notebook after the pipeline | One dependency graph, each PDF parsed exactly once, no double pipeline run; the cost is that the pipeline needs AI Functions on serverless |
+| AI control | Block release when the PDF disagrees with the ERP on total (0.5%), GSTIN or PO | Flag only | A tampered invoice must never count as touchless; the touchless rate drops by the blocked invoices |
+| Reconciliation | GL posted from sub-ledgers; delta explained by documented items | Override the GL with sub-ledger totals | A tie-out by construction proves nothing; an explained delta is what auditors accept |
+| Data reads in the app | On-behalf-of-user authorization | App service principal | Row filters and masks apply per user; the service principal remains for background streams only |
+| AP queue serving | Lakebase synced table from Gold | Direct warehouse queries | Millisecond reads for the queue the clerks work all day, with no warehouse warm-up |
+| Lakebase to UC write-back | Copy job (`ops_*` tables) | Lakebase database catalog | The database catalog needs metastore `CREATE CATALOG`, unavailable on the FEVM workspace |
+| Chat routing | Genie Conversation API; Agent Bricks supervisor optional | LLM-generated SQL | Genie answers from curated instructions and example SQL; the LLM fallback is guarded by a SQL parser and an allow-list |
+| Groups | Workspace-local groups with `is_member()` | Account groups | FEVM cannot create account groups; production swaps in `is_account_group_member()` |
+| Data | Deterministic synthetic generator (seed 42) | Customer data | Reproducible evidence; no customer data |
+
+## 4. AI tools and workflow
+
+- **Claude Code** was the build partner end to end: it read the FE BAR guidelines and the existing code, wrote the
+  validation of the earlier build (circular recon, 0 of 3 tampered PDFs caught, failed setup runs), wrote the fix
+  plan with acceptance tests, then implemented the fixes, deployed with the Databricks CLI, ran the job, queried the
+  results and collected the evidence in `evidence/`.
+- **Databricks AI Functions** (`ai_parse_document`, `ai_extract`) read the invoice PDFs inside the pipeline.
+- **MLflow** records the extraction accuracy and tamper-detection metrics for every build.
+- **Genie Agent** answers finance questions over the governed tables; the app chat uses the Genie Conversation API.
+- **Foundation Model API (Claude)** writes the tab summaries and is the guarded last-resort chat fallback.
+
+Representative prompts used during the build:
+
+1. "Validate this build against the FE BAR guidelines; query the deployed tables to prove or disprove each claim."
+2. "The recon delta is zero by construction. Generate journal entries from the sub-ledgers and seed a documented set
+   of reconciling items so the recon shows a non-zero delta that is fully explained."
+3. "Move AI extraction into the pipeline and block release when the PDF total, GSTIN or PO disagrees with the ERP;
+   evaluate recall on the seeded tampered PDFs in MLflow."
+4. "Collect text evidence for every acceptance test: SQL next to its result, job run exports, Genie transcripts."
+
+## 5. Deploy, run and tear down
 
 ```bash
-# 1. Point at your workspace (choose one)
-export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com   # + DATABRICKS_TOKEN
-#   ...or use a CLI profile:  --profile <your-cli-profile>
-
-# 2. Validate + deploy + build the demo from zero (idempotent, safe to re-run)
-databricks bundle validate -t dev
-./setup/setup.sh --var="warehouse_id=<your-warehouse-id>"
-
-# 3. Tear everything down (drops the catalog, then destroys bundle resources)
-./setup/teardown.sh
+./setup/setup.sh -p <profile> --var="catalog=<catalog>" --var="schema=<schema>" --var="warehouse_id=<id>"
+./setup/teardown.sh -p <profile> --var="catalog=<catalog>" --var="schema=<schema>" --var="warehouse_id=<id>"
 ```
 
-**Bundle contents**
+`setup.sh` deploys the bundle, runs the setup job, wires the Genie space into the app, grants the app identity and
+starts the app. [`MANUAL_DEPLOY.md`](MANUAL_DEPLOY.md) lists what each step creates and the platform constraints.
+The demo script is [`DEMO_FLOW.md`](DEMO_FLOW.md); testing is described in [`docs/testing.md`](docs/testing.md).
 
-| Component | Where | Type |
-|---|---|---|
-| DLT (Spark Declarative) pipeline | `resources/pipelines.yml` | bundle |
-| Setup job (data gen → DLT → gold → AI) | `resources/jobs.yml` (`fna_setup_job`) | bundle |
-| Teardown job (drop catalog) | `resources/jobs.yml` (`fna_teardown_job`) | bundle |
-| Databricks App (FastAPI + React) | `resources/apps.yml` | bundle |
-| Genie space · MAS/AgentBricks endpoint · Lakebase instance · Vector Search | — | **manual** → see [`MANUAL_DEPLOY.md`](MANUAL_DEPLOY.md) |
-
-Bundle variables (override with `--var="name=value"`): `catalog`, `schema`,
-`warehouse_id`, `lakebase_instance_name`. Setup/teardown scripts live in [`setup/`](setup/).
-
-### Enablement assets
-
-Everything another SA needs to run this demo lives in [`enablement/`](enablement/) and the docs:
-
-| Asset | Location |
+| Path | Contents |
 |---|---|
-| **Demo script** (standalone, ~15-min presenter's guide) | [`enablement/DEMO_SCRIPT.md`](enablement/DEMO_SCRIPT.md) |
-| Demo overview (architecture, tables, notebooks) | [`DEMO.md`](DEMO.md) |
-| Slide-mapped demo flow (buildathon variant) | [`DEMO_FLOW.md`](DEMO_FLOW.md) |
-| Pitch deck / demo video | _add link when available_ |
+| `notebooks/00a_Reset_Schema.py` | Creates schema and volumes, clears the landing zone |
+| `notebooks/00_Setup_and_Data_Generation.py` | Deterministic synthetic ERP extracts as raw CSV |
+| `notebooks/01a_Generate_PDF_Invoices.py` | Invoice PDFs from the ERP extract, with seeded tampering |
+| `notebooks/00d_Governance.py` | Groups, row filter, masks, tags, grants |
+| `notebooks/01_DLT_Pipeline.py` | The declarative pipeline, bronze to gold, AI extraction |
+| `notebooks/09_AI_Extraction_Evaluation.py` | MLflow evaluation |
+| `notebooks/10_Lakebase_Sync.py` | Lakebase synced table and UC write-back |
+| `notebooks/06_Genie_Space.py` | Genie space create/update |
+| `app/` | FastAPI backend and React frontend |
+| `resources/`, `databricks.yml` | The bundle |
+| `evidence/` | Execution evidence |
 
----
+## 6. Evidence index
 
-## 1. Business Problem
-
-Finance teams at mid-to-large enterprises operate across three critical workflows — Procure-to-Pay, Order-to-Cash, and Record-to-Report. Each is burdened by the same structural problem: **data is everywhere except where it needs to be**.
-
-### The Pain Points
-
-| Workflow | Pain Point | Business Impact |
-|---|---|---|
-| **P2P** | Invoices arrive via email, PDF, supplier portal — unstructured, unmatched | AP clerks spend 60–70% of time on manual matching and exception handling |
-| **P2P** | 3-way matching (PO ↔ Invoice ↔ GRN) done in spreadsheets | Duplicate payments, overpayments, fraud exposure |
-| **O2C** | AR aging data lives in ERP exports, updated weekly | Collections team works stale data; DSO increases |
-| **O2C** | No single view of customer credit + outstanding + dispute history | Credit decisions made without full context |
-| **R2R** | Journal entries validated manually at month-end | Close cycle takes 5–10 business days; late detection of errors |
-| **R2R** | Trial balance assembled from multiple ERP extracts | Material reconciliation errors surface post-close |
-| **Cross** | No unified data model across P2P, O2C, R2R | CFO/Controller cannot see working capital in one place |
-| **Cross** | AI/ML insights blocked by poor data quality | Finance teams cannot leverage predictive analytics |
-
-### The Root Cause
-
-Finance data is **fragmented by design** — ERPs are transactional systems optimised for recording, not analysing. The result: a permanent gap between the data that exists and the insights finance teams need to operate.
-
----
-
-## 2. Value Proposition
-
-### What This Platform Delivers
-
-```
-FROM                                    TO
-─────────────────────────────────────────────────────────────────
-Manual 3-way matching (2–3 days)   →   Automated in minutes (DLT Silver layer)
-Invoice processing (5–7 days)      →   AI extraction in seconds (ai_parse_document)
-Month-end close (5–10 days)        →   Continuous close with live trial balance
-ERP-locked analytics               →   Natural language queries (Genie / AI Chat)
-Siloed P2P / O2C / R2R views       →   Unified working capital dashboard
-Spreadsheet-driven reporting       →   Production-grade Delta Gold tables
-Reactive exception handling        →   Proactive DQ enforcement (DLT Expectations)
-```
-
-### Quantified Impact
-
-| Metric | Before | After | Improvement |
-|---|---|---|---|
-| Invoice processing cost | $8–12 per invoice (manual) | $1–2 per invoice (automated) | **75–85% reduction** |
-| 3-way match cycle time | 2–3 days | Real-time | **99% faster** |
-| Touchless invoice rate | 0% | 33.9% (demo data) | **Straight-through processing** |
-| Month-end close | 5–10 business days | 2–3 days | **50–70% faster** |
-| DSO visibility | Weekly batch | Real-time | **Continuous** |
-| Data quality errors reaching reporting | Unknown | 0 (quarantined) | **100% prevention** |
-
----
-
-## 3. How Databricks Solves It
-
-Each capability maps directly to a Databricks product:
-
-| Business Need | Databricks Solution | Why It Matters |
-|---|---|---|
-| **Ingest ERP data at scale** | Auto Loader + Delta Live Tables | Incremental, idempotent ingestion; handles schema evolution |
-| **Enforce data quality** | DLT Expectations + Quarantine pattern | SOX-ready quality contracts; bad records never reach reporting |
-| **3-way matching** | DLT Silver transformations | Automated PO ↔ Invoice ↔ GRN match at pipeline time |
-| **AI invoice extraction** | `ai_parse_document()` + `ai_extract()` | Built-in SQL functions; no custom model, no API keys |
-| **Unified governance** | Unity Catalog | Single namespace, column-level lineage, RBAC, audit trail |
-| **Business-ready models** | Delta Gold tables | Pre-aggregated P2P, O2C, R2R metrics; sub-second query |
-| **Natural language analytics** | Genie AI Analyst | Finance users query in English; no SQL knowledge required |
-| **Real-time operations app** | Databricks Apps + SSE | OAuth SSO, serverless hosting, streamed live data |
-| **Operational state** | Lakebase (managed Postgres) | ACID writes for AP approvals, AR call logs, chat history |
-| **Intelligent AI routing** | Claude via FMAPI (multi-agent) | Supervisor routes queries to domain-specific Genie spaces |
-
----
-
-## 4. Platform Architecture
-
-### Medallion Lakehouse Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  DATA SOURCES                                                        │
-│  ERP Exports (SAP/Oracle/NetSuite) · Invoice PDFs · Email           │
-└────────────────────────┬────────────────────────────────────────────┘
-                         │ Auto Loader / Staged files
-                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  BRONZE LAYER  (Raw Ingestion — Delta Live Tables)                  │
-│  bronze_vendors · bronze_customers · bronze_po_header               │
-│  bronze_p2p_invoices · bronze_journal_entries                       │
-│  bronze_raw_invoice_documents (UC Volume)                           │
-│  DLT Expectations: drop nulls, validate formats                     │
-└────────────────────────┬────────────────────────────────────────────┘
-                         │ DLT transformations + AI functions
-                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  SILVER LAYER  (Cleansed & Enriched — Delta Live Tables)            │
-│  silver_p2p_invoices  ← dedup + 3-way match (match_status)          │
-│  silver_invoice_extractions  ← ai_parse_document + ai_extract       │
-│  DLT Expectations: quarantine unbalanced JEs, future-dated invoices │
-└────────────────────────┬────────────────────────────────────────────┘
-                         │ Spark SQL Gold transformations
-                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  GOLD LAYER  (Business Models — Delta Tables)                       │
-│  P2P: gold_dim_vendor · gold_fact_invoices · gold_fact_payments     │
-│  O2C: gold_dim_customer · gold_fact_sales · gold_fact_collections   │
-│  R2R: gold_fact_gl · gold_fact_trial_balance                        │
-└──────────────┬─────────────────────────────┬───────────────────────┘
-               │                             │
-               ▼                             ▼
-┌──────────────────────┐       ┌─────────────────────────────────────┐
-│  GENIE AI ANALYST    │       │  FINANCE OPERATIONS APP             │
-│  Natural language    │       │  React + FastAPI on Databricks Apps │
-│  queries on all 9    │       │  AP · AR · GL tabs · SSE streaming  │
-│  Gold tables         │       │  Lakebase for operational state     │
-│  No SQL required     │       │  Multi-agent AI chat sidebar        │
-└──────────────────────┘       └─────────────────────────────────────┘
-               │                             │
-               └──────────────┬──────────────┘
-                              ▼
-                 ┌────────────────────────┐
-                 │  MULTI-AGENT AI CHAT   │
-                 │  Claude Supervisor     │
-                 │  (FMAPI tool_use mode) │
-                 │  ↓ routes to          │
-                 │  P2P · O2C · R2R       │
-                 │  Genie sub-agents      │
-                 └────────────────────────┘
-```
-
-### Governance Layer (Unity Catalog)
-
-All tables live in a single 3-part namespace:
-```
-fna_control_tower_catalog.finance_and_accounting.<table_name>
-```
-- Full column-level lineage from source file to Gold
-- AI-generated table and column descriptions
-- RBAC: row-level security available for vendor/customer data isolation
-- Audit trail for SOX compliance
-
----
-
-## 5. Process Flows
-
-### 5.1 Procure-to-Pay (P2P)
-
-```
-Vendor Invoice arrives (email / portal / EDI)
-        │
-        ▼
-[Bronze] Invoice captured as-is
-  DLT Expectations: amount > 0, vendor_id NOT NULL
-        │
-        ▼
-[Silver] 3-Way Match Engine
-  Looks up PO from bronze_po_header
-  Checks GRN from bronze_grn
-  Computes match_status:
-    ✅ THREE_WAY_MATCHED   — PO + GRN + Invoice within 2% tolerance
-    ✓  TWO_WAY_MATCHED     — PO matches, no GRN yet
-    ⚠  AMOUNT_MISMATCH     — PO exists, amount differs > 2%
-    ✗  NO_PO_REFERENCE     — No linked purchase order found
-        │
-        ▼
-[AI Layer] ai_parse_document() → ai_extract()
-  Extracts: invoice_number, vendor, GSTIN, line items,
-            CGST, SGST, total, bank details, IFSC
-        │
-        ▼
-[Gold] gold_fact_invoices
-  Aging buckets: 0-30 / 31-60 / 61-90 / 90+ days
-  DPO calculation, match_compliance_pct per vendor
-        │
-        ▼
-[App] Finance Operations App — AP Tab
-  Invoice queue streams in via SSE
-  Exceptions surfaced for manual review
-  Approve / Reject with reason → logged to Lakebase
-```
-
-**Key metric:** 33.9% of invoices are `THREE_WAY_MATCHED` → eligible for straight-through payment processing (no human touch required).
-
----
-
-### 5.2 Order-to-Cash (O2C)
-
-```
-Sales Order created
-        │
-        ▼
-[Bronze] Customer invoices + payment receipts
-        │
-        ▼
-[Silver] Collections enrichment
-  Days overdue calculated per invoice
-  Short payments flagged
-        │
-        ▼
-[Gold] gold_fact_collections + gold_dim_customer
-  DSO (Days Sales Outstanding) by segment
-  Aging buckets per customer
-  CEI (Collections Effectiveness Index)
-        │
-        ▼
-[App] Finance Operations App — AR Tab
-  Overdue customer queue with call priority
-  Promise-to-Pay logging → Lakebase ar_call_logs
-  Cash application feed via SSE
-```
-
----
-
-### 5.3 Record-to-Report (R2R)
-
-```
-Journal entries posted in ERP
-        │
-        ▼
-[Bronze] bronze_journal_entries
-  DLT Expectation: abs(debit - credit) < 0.01
-  Unbalanced entries → bronze_je_exceptions (quarantine)
-        │
-        ▼
-[Gold] gold_fact_gl + gold_fact_trial_balance
-  50 GL accounts · 2,000 journal entries
-  Trial balance with debit/credit totals
-  Period-over-period variance flags
-        │
-        ▼
-[App] Finance Operations App — GL Tab
-  Month-end close checklist
-  JE validation feed via SSE
-  Live trial balance build with variance alerts
-```
-
----
-
-## 6. AI Layer
-
-### 6.1 Invoice AI Processing (`ai_parse_document` + `ai_extract`)
-
-Databricks built-in SQL functions — no custom model deployment, no API keys, no prompt engineering.
-
-```sql
--- Step 1: Parse raw invoice document (OCR + text extraction)
-SELECT ai_parse_document(binary_content) AS parsed
-FROM bronze_raw_invoice_documents;
-
--- Step 2: Extract structured fields from parsed text
-SELECT ai_extract(
-  parsed:content::STRING,
-  ARRAY[
-    'invoice_number', 'vendor_name', 'vendor_gstin',
-    'invoice_date', 'due_date', 'po_reference',
-    'subtotal', 'cgst', 'sgst', 'total_amount',
-    'bank_account_number', 'ifsc_code'
-  ]
-) AS extracted_fields
-FROM silver_parsed_invoices;
-```
-
-**Validation:** Extracted `total_amount` is reconciled against the ERP-sourced amount (±2% tolerance). High-confidence extractions are approved for straight-through processing.
-
-### 6.2 Multi-Agent AI Chat
-
-```
-User question
-      │
-      ▼
-Claude Supervisor (FMAPI, tool_use mode)
-  Sees: system prompt + last 10 conversation turns (from Lakebase)
-  Tool choice: FORCED (must call exactly one tool)
-      │
-      ├──► call_p2p_agent   →  P2P Genie space  →  gold_dim_vendor,
-      │                                             gold_fact_invoices,
-      │                                             gold_fact_payments
-      │
-      ├──► call_o2c_agent   →  O2C Genie space  →  gold_dim_customer,
-      │                                             gold_fact_sales,
-      │                                             gold_fact_collections
-      │
-      ├──► call_r2r_agent   →  R2R Genie space  →  gold_fact_gl,
-      │                                             gold_fact_trial_balance
-      │
-      └──► call_full_agent  →  Full space        →  All 9 Gold tables
-```
-
-**Session memory:** Every Q&A turn is persisted to Lakebase `chat_history`. Prior turns are loaded on each request and injected into the supervisor's context — enabling multi-turn references like "those vendors" and "that customer from earlier".
-
----
-
-## 7. Finance Operations App
-
-**URL:** https://<your-app>.databricksapps.com
-
-### Three Finance Tabs
-
-| Tab | Live Data Feed | Key Actions |
-|---|---|---|
-| **AP Operations** | Invoice queue via SSE (`/stream/p2p`) | Approve / Reject exceptions, logged to Lakebase |
-| **AR Operations** | AR aging via SSE (`/stream/o2c`) | Log collection calls (PTP/Dispute/Voicemail/Escalate) |
-| **GL Operations** | JE validation via SSE (`/stream/r2r`) | Close checklist, variance review |
-
-### SSE Streaming Architecture
-
-```
-React frontend                    FastAPI backend              Delta Gold tables
-─────────────────────────────────────────────────────────────────────────────────
-EventSource(/stream/p2p)   →→→   databricks-sql-connector  →→→  gold_fact_invoices
-                                 SELECT * ORDER BY date DESC
-                                 emit per record (0.5–1.5s delay)
-                                 JSON: {type, match_status, vendor, amount}
-```
-
-### Lakebase Operational State
-
-| Table | What It Stores |
+| File | Proves |
 |---|---|
-| `ap_approvals` | Invoice approval/rejection decisions with reason and approver |
-| `ar_call_logs` | Collection call outcomes (PTP date, notes, logged-by) |
-| `chat_history` | All AI chat turns with session_id, routing info, SQL used |
-
----
-
-## 8. Conversational AI — Multi-Agent System
-
-### Session-Based Context Memory
-
-```
-1. Frontend generates session_id = crypto.randomUUID() on panel mount
-2. Every POST /api/chat sends {question, active_tab, session_id}
-3. Backend loads last 10 Q&A pairs from Lakebase for this session
-4. Prior turns injected into Claude's context before the current question
-5. After response: turn persisted back to Lakebase chat_history
-6. History drawer: /api/my-sessions → resume any past session
-```
-
-**Multi-turn example:**
-- Q1: "What is the total invoice spend?" → P2P Agent → ₹147Cr
-- Q2: "Which of **those vendors** have compliance below 80%?" → resolves from Q1 ✅
-- Q3: "Switch to AR — top overdue customers?" → O2C Agent (cross-domain shift) ✅
-- Q4: "DSO for **that top customer**?" → resolves "that customer" from Q3 ✅
-
----
-
-## 9. Data Quality & Governance
-
-### DLT Expectations
-
-| Table | Expectation | Action on Fail |
-|---|---|---|
-| `bronze_p2p_invoices` | `valid_amount`: amount > 0 | DROP |
-| `bronze_p2p_invoices` | `has_vendor`: vendor_id IS NOT NULL | DROP |
-| `bronze_journal_entries` | `balanced_entry`: abs(debit-credit) < 0.01 | QUARANTINE → `bronze_je_exceptions` |
-| `silver_p2p_invoices` | `no_future_invoices`: invoice_date <= today | WARN |
-| `silver_p2p_invoices` | `valid_match_status`: status IN (...) | DROP |
-
-### Unity Catalog Lineage
-
-Every Gold table cell is traceable back to the source file:
-```
-Source file (UC Volume)
-  → bronze_raw_invoice_documents  (Auto Loader)
-    → silver_invoice_extractions  (DLT + ai_parse_document)
-      → gold_fact_invoices        (Gold transformation)
-        → Genie AI query result
-```
-
----
-
-## 10. Key Metrics
-
-### Data Volume (Demo Dataset)
-
-| Table | Rows | Description |
-|---|---|---|
-| `bronze_vendors` | 100 | Vendor master with GSTIN |
-| `bronze_customers` | 150 | Customer master, 5 segments |
-| `bronze_po_header` | 500 | Purchase orders, 8 categories |
-| `bronze_p2p_invoices` | 577 | Includes ~5% intentional duplicates |
-| `bronze_journal_entries` | 2,000 | 50 GL accounts |
-| `bronze_raw_invoice_documents` | 200 | Text invoice files in UC Volume |
-| `silver_p2p_invoices` | 548 | Post-dedup, with match_status |
-| `silver_invoice_extractions` | 200 | AI-extracted structured fields |
-| `gold_fact_invoices` | 548 | With aging, DPO, match metadata |
-| `gold_fact_payments` | 138 | Confirmed payments |
-| `gold_fact_sales` | 600 | Customer invoices |
-| `gold_fact_collections` | 253 | Collection records with DSO |
-| `gold_fact_gl` | 3,430 | General ledger entries |
-| `gold_fact_trial_balance` | 350 | Trial balance by period |
-
-### Live Business KPIs
-
-| KPI | Value |
-|---|---|
-| Total invoices | 548 |
-| Three-way matched (touchless) | 186 — **33.9%** |
-| Exceptions requiring review | 193 |
-| Average DPO | 37.5 days |
-| Payment run staged | ₹147 Cr |
-| Overdue AR | ₹489 Cr |
-
----
-
-## 11. Tech Stack
-
-### Data Platform
-
-| Component | Technology |
-|---|---|
-| Data lakehouse | Azure Databricks |
-| Table format | Delta Lake |
-| Ingestion pipelines | Delta Live Tables (DLT), serverless |
-| Data governance | Unity Catalog |
-| AI SQL functions | `ai_parse_document()`, `ai_extract()` (built-in) |
-| Natural language analytics | Databricks Genie |
-| SQL Warehouse | Serverless |
-
-### Application Layer
-
-| Component | Technology |
-|---|---|
-| App hosting | Databricks Apps (serverless, OAuth SSO) |
-| Frontend | React 19 + TypeScript + Tailwind CSS v4 + Framer Motion |
-| Backend | FastAPI + uvicorn + sse-starlette |
-| DB connector | `databricks-sql-connector` |
-| Operational DB | Lakebase (managed Postgres) |
-
-### AI Layer
-
-| Component | Technology |
-|---|---|
-| LLM | Claude (`databricks-claude-sonnet-4-5` via FMAPI) |
-| Supervisor pattern | `tool_use` mode with forced tool choice (`tool_choice: any`) |
-| Sub-agents | Genie API (`/api/2.0/genie/spaces/{id}/start-conversation`) |
-| Session memory | Lakebase `chat_history` — last 10 turns injected as context |
-
----
-
-## 12. Quick Reference
-
-| Resource | Value |
-|---|---|
-| Workspace | `https://<your-workspace>.cloud.databricks.com` |
-| CLI Profile | `<your-cli-profile>` |
-| Catalog · Schema | `fna_control_tower_catalog` · `finance_and_accounting` |
-| App URL | `https://<your-app>.databricksapps.com` |
-| App Service Principal | `<your-service-principal-id>` |
-| DLT Pipeline ID | `<your-pipeline-id>` |
-| Genie Space ID | `<your-genie-space-id>` |
-| SQL Warehouse ID | `<your-warehouse-id>` |
-| Lakebase Instance ID | `<your-lakebase-instance-id>` |
-| Tech Demo Deck (25 slides) | (URL redacted) |
-
----
-
-## 13. Repo Structure
-
-```
-finance & accounting demo/
-├── README.md                          ← This file
-├── MANUAL_DEPLOY.md                   ← Components not deployable via the bundle
-├── databricks.yml                     ← Asset Bundle root (name, variables, dev target)
-├── resources/                         ← Bundle resource definitions
-│   ├── pipelines.yml                  ← DLT (Spark Declarative) pipeline
-│   ├── jobs.yml                       ← Setup + teardown jobs
-│   └── apps.yml                       ← Databricks App + resource bindings
-├── setup/                             ← Idempotent setup / teardown
-│   ├── setup.sh                       ← Deploy bundle + build demo from zero
-│   ├── teardown.sh                    ← Drop catalog + destroy bundle resources
-│   └── teardown_catalog.py            ← Notebook: DROP CATALOG ... CASCADE (run by teardown job)
-├── enablement/                        ← Enablement assets for other SAs
-│   └── DEMO_SCRIPT.md                 ← Standalone ~15-min presenter's demo script
-│
-├── app/                               ← Finance Operations App
-│   ├── app.yaml                       ← Databricks Apps config (resource IDs injected by bundle)
-│   ├── requirements.txt               ← Fully pinned deps (== ), regenerated from requirements.in
-│   ├── backend/
-│   │   ├── main.py                    ← FastAPI: metrics, SSE streams, chat, Lakebase endpoints
-│   │   ├── chat.py                    ← Multi-agent supervisor (Claude tool_use + Genie sub-agents)
-│   │   ├── lakebase.py                ← Postgres: session memory, approvals, call logs
-│   │   ├── db.py                      ← Delta SQL: KPI queries, payment run, aging
-│   │   ├── streams.py                 ← SSE generators for P2P / O2C / R2R
-│   │   └── config.py                  ← Workspace host, token, catalog/schema
-│   └── frontend/src/
-│       ├── App.tsx                    ← Root: tab routing, user identity (/api/me)
-│       └── components/
-│           ├── APTab.tsx              ← AP Operations: invoice queue, exception drawer, approvals
-│           ├── ARTab.tsx              ← AR Operations: aging, collection call modal
-│           ├── GLTab.tsx              ← GL Operations: close checklist, JE feed
-│           ├── AIChatPanel.tsx        ← Multi-agent chat: markdown renderer, session history drawer
-│           ├── GreetingBanner.tsx     ← Personalised greeting with dismiss
-│           └── KPICard.tsx            ← Metric display component
-│
-└── notebooks/                         ← Databricks workspace notebooks
-    ├── 00_Setup_and_Data_Generation   ← Synthetic data: 577 invoices, 150 customers, 2000 JEs
-    ├── 01_DLT_Pipeline                ← Bronze + Silver via DLT with expectations
-    ├── 02_Gold_Layer_P2P              ← gold_dim_vendor, gold_fact_invoices, gold_fact_payments
-    ├── 03_Gold_Layer_O2C              ← gold_dim_customer, gold_fact_sales, gold_fact_collections
-    ├── 04_Gold_Layer_R2R              ← gold_fact_gl, gold_fact_trial_balance
-    ├── 05_Invoice_AI_Processing       ← ai_parse_document + ai_extract → silver_invoice_extractions
-    ├── 06_Genie_Space_Setup           ← Table descriptions and sample questions
-    ├── 07_Create_Genie_Space          ← Created Genie space via SDK
-    └── 08_Configure_Genie_Space       ← Added instructions and curated questions
-```
-
----
-
-## 14. Demo Walkthrough
-
-### Recommended Script (20 minutes)
-
-**Act 1 — Frame the Problem (2 min)**
-Open the app. Show the header KPIs: 548 invoices, 193 exceptions, ₹489Cr overdue AR.
-> *"This is the state of finance operations without a unified platform. 193 invoices need human attention. ₹489Cr is sitting uncollected. The team doesn't know which ones to prioritise."*
-
-**Act 2 — Live Operations (8 min)**
-- Click **Start** on AP tab → invoices stream in with `match_status` badges
-- Point out green `THREE_WAY_MATCHED` (no touch needed) vs orange `AMOUNT_MISMATCH` vs red `NO_PO_REFERENCE`
-- Open an exception → show AI-extracted fields vs ERP fields side by side → Approve with reason
-- Switch to AR tab → overdue queue → log a Promise-to-Pay call
-- Switch to GL tab → close checklist → JE validation feed
-
-**Act 3 — Conversational AI (5 min)**
-- Ask: *"Which invoices are at risk of late payment this week?"*
-- Show: routing badge (Supervisor → P2P Agent → Genie), bold vendor names, SQL accordion
-- Ask follow-up: *"Which of those vendors have compliance below 80%?"*
-- Show: answer resolves "those vendors" from context — no need to repeat
-- Open history drawer → show past sessions → click to resume any thread
-
-**Act 4 — Platform Depth (5 min)**
-- Open Unity Catalog → data lineage from `gold_fact_invoices` back to source invoice file
-- Open DLT pipeline → show expectations and the quarantine table for bad records
-- Open `silver_invoice_extractions` → show AI-extracted GSTIN, bank account, amounts next to ERP data
-
-### Key Talking Points
-
-1. **No custom model required** — `ai_parse_document()` and `ai_extract()` are built-in SQL functions. Finance teams don't need an ML team.
-
-2. **SOX-ready by design** — DLT Expectations enforce explicit quality contracts. Unity Catalog tracks every transformation. The audit trail is automatic, not retrofitted.
-
-3. **Finance users self-serve** — Genie and the AI chat let controllers and CFOs query data in plain English. No ticket to the data team, no waiting for a scheduled report.
-
-4. **Scales without rearchitecting** — From 548 invoices to 5 million: same Delta tables, same DLT pipeline, serverless autoscaling. No infrastructure changes.
-
-5. **One platform** — Ingestion, quality enforcement, AI, analytics, the app, and the operational database all on Databricks. No separate ETL tool, no separate AI platform, no separate app hosting.
-
----
-
-*Built by Databricks Field Engineering*
-*Platform: Azure Databricks · Catalog: `fna_control_tower_catalog` · March 2026*
+| [`evidence/RUN_LOG.md`](evidence/RUN_LOG.md) | Workspace, run ids, pass/fail per stage |
+| [`evidence/F4_job_runs.md`](evidence/F4_job_runs.md) | Two consecutive successful setup-job runs |
+| [`evidence/job_outputs.json`](evidence/job_outputs.json) | Each task's `dbutils.notebook.exit` output |
+| [`evidence/pipeline_event_log.md`](evidence/pipeline_event_log.md) | Expectation pass/fail counts per rule |
+| [`evidence/F1_recon.md`](evidence/F1_recon.md) | Trial balance balances; recon tied with explained items |
+| [`evidence/ai_eval.md`](evidence/ai_eval.md) | Extraction accuracy, tamper recall, MLflow run id |
+| [`evidence/kpi_queries.md`](evidence/kpi_queries.md) | Every KPI with its SQL and result |
+| [`evidence/F8_governance.md`](evidence/F8_governance.md) | Grants, masks, row filter, tags; masked vs clear reads |
+| [`evidence/lineage.md`](evidence/lineage.md) | Lineage from raw volumes to gold and the synced table |
+| [`evidence/lakebase.md`](evidence/lakebase.md) | Synced queue and app write-backs in Postgres and UC |
+| [`evidence/genie_transcripts.md`](evidence/genie_transcripts.md) | Genie questions, generated SQL and answers |
+| [`evidence/app_api_responses.md`](evidence/app_api_responses.md) | Live API responses from the deployed app |
+| [`evidence/tests.md`](evidence/tests.md) | Unit and end-to-end test output |

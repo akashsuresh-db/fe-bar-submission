@@ -279,6 +279,9 @@ EXTRACTION_FIELDS = [
 ]
 
 
+GSTIN_PATTERN = r"([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z])"
+
+
 def _amount(field):
     return F.regexp_replace(F.col(f"fields.{field}"), "[^0-9.]", "").cast("double")
 
@@ -311,7 +314,10 @@ def silver_invoice_extractions():
         "invoice_id", "file_path", "file_size_bytes",
         F.col("fields.invoice_number").alias("extracted_invoice_number"),
         F.col("fields.vendor_name").alias("extracted_vendor_name"),
-        F.col("fields.vendor_gstin").alias("extracted_gstin"),
+        # GSTIN has a fixed 15-character format; when ai_extract returns nothing, read it from the parsed text
+        F.coalesce(F.when(F.trim(F.col("fields.vendor_gstin")) != "", F.trim(F.col("fields.vendor_gstin"))),
+                   F.when(F.regexp_extract("document_text", GSTIN_PATTERN, 1) != "",
+                          F.regexp_extract("document_text", GSTIN_PATTERN, 1))).alias("extracted_gstin"),
         F.to_date(F.col("fields.invoice_date"), "dd-MMM-yyyy").alias("extracted_invoice_date"),
         F.to_date(F.col("fields.due_date"), "dd-MMM-yyyy").alias("extracted_due_date"),
         F.col("fields.po_reference").alias("extracted_po_reference"),
