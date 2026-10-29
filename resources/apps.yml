@@ -1,0 +1,56 @@
+# Databricks App — FastAPI backend + prebuilt React frontend (app/backend/static).
+# Runtime command and env are declared here (config block) so catalog, schema and resource ids come from
+# bundle variables; resource-backed values use valueFrom.
+resources:
+  apps:
+    fna_control_tower_app:
+      name: "cfo-fna-control-tower-${bundle.target}"
+      description: "Finance Operations Control Tower (Meridian Advisory, synthetic data)"
+      source_code_path: ../app
+      # On-behalf-of-user authorization: data reads and Genie questions run as the signed-in user,
+      # so Unity Catalog row filters and column masks apply per user.
+      user_api_scopes:
+        - sql
+        - dashboards.genie
+      config:
+        command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+        env:
+          - name: DATABRICKS_WAREHOUSE_ID
+            value_from: sql-warehouse
+          - name: GENIE_SPACE_ID
+            value: ${var.genie_space_id}
+          - name: MAS_ENDPOINT_NAME
+            value: ${var.mas_endpoint_name}
+          - name: LLM_ENDPOINT
+            value: ${var.llm_endpoint}
+          - name: DATABRICKS_CATALOG
+            value: ${var.catalog}
+          - name: DATABRICKS_SCHEMA
+            value: ${var.schema}
+          - name: LAKEBASE_INSTANCE_NAME
+            value: ${var.lakebase_instance_name}
+          - name: PGDATABASE
+            value: ${var.lakebase_database}
+          - name: PGPORT
+            value: "5432"
+          - name: PGSSLMODE
+            value: "require"
+          - name: DEMO_MODE
+            value: "false"
+      resources:
+        - name: sql-warehouse
+          description: SQL warehouse for KPI queries, chat SQL and Genie
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: claude-endpoint
+          description: Foundation-model serving endpoint (summaries and last-resort chat)
+          serving_endpoint:
+            name: ${var.llm_endpoint}
+            permission: CAN_QUERY
+        - name: finance-ops-db
+          description: Lakebase (managed Postgres) database for app state and the synced AP queue
+          database:
+            instance_name: ${resources.database_instances.fna_lakebase.name}
+            database_name: ${var.lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE

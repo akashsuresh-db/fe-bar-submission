@@ -1,17 +1,19 @@
-# Spark Declarative (DLT) pipeline — Bronze -> Silver.
-# The notebook reads catalog/schema from the pipeline `configuration` block.
+# Lakeflow Spark Declarative Pipeline — Bronze -> Silver -> Gold, including AI extraction.
+# The notebook reads catalog/schema/governance from the pipeline `configuration` block.
 resources:
   pipelines:
     fna_dlt_pipeline:
       name: "cfo-fna-control-tower-dlt-${bundle.target}"
       catalog: ${var.catalog}
-      target: ${var.schema}
+      schema: ${var.schema}
       serverless: true
       channel: CURRENT
       photon: true
       configuration:
         catalog: ${var.catalog}
         schema: ${var.schema}
+        # Row filter on legal_entity + column masks (functions created by 00d_Governance phase=pre)
+        governance: "true"
       libraries:
         - notebook:
             path: ../notebooks/01_DLT_Pipeline.py

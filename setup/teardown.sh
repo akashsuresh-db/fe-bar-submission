@@ -20,11 +20,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET="${BUNDLE_TARGET:-dev}"
 cd "$REPO_ROOT"
 
-echo "==> [1/2] Dropping demo catalog (UC data the bundle does not own)"
+echo "==> [1/2] Dropping the demo schema (UC data the bundle does not own)"
 databricks bundle run fna_teardown_job -t "$TARGET" "$@" || \
-  echo "    (teardown job not available — catalog may already be gone)"
+  echo "    (teardown job not available — schema may already be gone)"
 
-echo "==> [2/2] Destroying bundle-managed resources (pipeline, jobs, app)"
+echo "==> [2/2] Destroying bundle-managed resources (pipeline, jobs, Lakebase instance, app)"
 databricks bundle destroy -t "$TARGET" --auto-approve "$@"
 
 echo ""

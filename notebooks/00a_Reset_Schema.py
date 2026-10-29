@@ -1,12 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Reset schema (idempotent re-run guard)
+# MAGIC # Reset raw landing zone (idempotent re-run guard)
 # MAGIC
-# MAGIC On a re-run the DLT pipeline has already turned `bronze_*` (and silver/gold)
-# MAGIC into **streaming tables / materialized views**, which the data-generation
-# MAGIC notebook cannot `CREATE OR REPLACE` (`STREAMING_TABLE_OPERATION_NOT_ALLOWED`).
-# MAGIC This task drops every table/view in the demo schema so the build starts clean.
-# MAGIC Volumes (raw_invoices, raw_csv) are left intact and re-created `IF NOT EXISTS`.
+# MAGIC Creates the schema and the two landing volumes (`raw_csv`, `raw_invoices`) and clears every
+# MAGIC file in them, so data generation starts from an empty landing zone. Pipeline-owned tables are
+# MAGIC **not** dropped here: the setup job runs the pipeline with `full_refresh: true`, which rebuilds
+# MAGIC every streaming table and materialized view from the freshly landed files.
+# MAGIC
+# MAGIC Errors are logged and re-raised. A failed reset must fail the job, not be silently skipped.
 
 # COMMAND ----------
 
@@ -15,26 +16,29 @@ dbutils.widgets.text("schema", "finance_and_accounting")
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 
-try:
-    objs = [r["tableName"] for r in spark.sql(f"SHOW TABLES IN {CATALOG}.{SCHEMA}").collect()]
-except Exception as e:
-    print(f"[reset] schema not queryable yet ({e}) — nothing to drop")
-    objs = []
+existing = [r[0] for r in spark.sql("SHOW CATALOGS").collect()]
+if CATALOG not in existing:
+    spark.sql(f"CREATE CATALOG {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+for vol in ("raw_csv", "raw_invoices"):
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.{vol}")
 
-dropped = 0
-for name in objs:
-    fq = f"{CATALOG}.{SCHEMA}.`{name}`"
-    for stmt in (
-        f"DROP MATERIALIZED VIEW IF EXISTS {fq}",
-        f"DROP VIEW IF EXISTS {fq}",
-        f"DROP TABLE IF EXISTS {fq}",
-    ):
+# COMMAND ----------
+
+import json
+
+cleared = {}
+for vol in ("raw_csv", "raw_invoices"):
+    root = f"/Volumes/{CATALOG}/{SCHEMA}/{vol}"
+    n = 0
+    for entry in dbutils.fs.ls(root):
         try:
-            spark.sql(stmt)
-            dropped += 1
-            print(f"[reset] dropped {name}")
-            break
-        except Exception:
-            continue
+            dbutils.fs.rm(entry.path, recurse=True)
+            n += 1
+        except Exception as e:
+            print(f"[reset] FAILED to remove {entry.path}: {e}")
+            raise
+    cleared[vol] = n
+    print(f"[reset] cleared {n} entries from {root}")
 
-print(f"[reset] cleared {dropped} object(s) from {CATALOG}.{SCHEMA}")
+dbutils.notebook.exit(json.dumps({"catalog": CATALOG, "schema": SCHEMA, "cleared": cleared}))

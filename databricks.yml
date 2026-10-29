@@ -1,12 +1,13 @@
 # Databricks Asset Bundle for the Finance & Accounting Ops Control Tower demo.
 #
 # Deployable components covered by this bundle:
-#   - Spark Declarative (DLT) pipeline .... resources/pipelines.yml
-#   - Setup job (data gen -> DLT -> gold -> AI) .. resources/jobs.yml
-#   - Databricks App (FastAPI + React) ......... resources/apps.yml
+#   - Lakeflow declarative pipeline (bronze -> silver -> gold, AI extraction) .. resources/pipelines.yml
+#   - Setup job (land data -> governance -> pipeline -> eval -> Lakebase -> Genie) and teardown job .. resources/jobs.yml
+#   - Lakebase (managed Postgres) instance ............................... resources/lakebase.yml
+#   - Databricks App (FastAPI + React) ................................... resources/apps.yml
 #
-# Components that cannot be deployed via a bundle (Genie space, MAS / AgentBricks
-# endpoint, Lakebase instance, Vector Search) are documented in MANUAL_DEPLOY.md.
+# The Genie space is created by the setup job (Genie validates that its tables exist, so it cannot be
+# created before the pipeline has run); setup/setup.sh passes its id back with --var genie_space_id=<id>.
 #
 # Quick start:
 #   export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com   # or use -p <profile>
@@ -28,11 +29,22 @@ variables:
     description: Schema within the catalog
     default: finance_and_accounting
   warehouse_id:
-    description: Existing SQL warehouse ID used by the app (and Genie space)
-    default: ""
+    description: Existing SQL warehouse ID used by the app, the Genie space and the setup job
   lakebase_instance_name:
-    description: Lakebase (managed Postgres) instance name backing the app
-    default: finance-ops-db
+    description: Lakebase (managed Postgres) instance created by this bundle for the app
+    default: fna-control-tower-db
+  lakebase_database:
+    description: Postgres database used by the app (the instance default database, so the app resource can bind at first deploy)
+    default: databricks_postgres
+  genie_space_id:
+    description: Genie space id (output of the setup job's genie_space task; set by setup/setup.sh)
+    default: ""
+  llm_endpoint:
+    description: Foundation Model API endpoint used for summaries and the last-resort chat fallback
+    default: databricks-claude-sonnet-4-5
+  mas_endpoint_name:
+    description: Optional Agent Bricks supervisor endpoint; when empty the app chat routes to Genie
+    default: ""
 
 include:
   - resources/*.yml

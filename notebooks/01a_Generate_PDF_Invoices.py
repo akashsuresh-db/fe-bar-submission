@@ -2,8 +2,9 @@
 # MAGIC %md
 # MAGIC # 01a - Generate PDF Invoices from Raw Text
 # MAGIC
-# MAGIC Reads `raw_text` from `bronze_raw_invoice_documents`, generates a TAX INVOICE-styled PDF
-# MAGIC per invoice using ReportLab, writes the PDF to `/Volumes/.../raw_invoices/INV*.pdf`.
+# MAGIC Reads the landed ERP extracts (`raw_csv/p2p_invoices`, `raw_csv/vendors`), generates a TAX INVOICE-styled
+# MAGIC PDF per sampled invoice using ReportLab, and writes it to `/Volumes/.../raw_invoices/INV*.pdf`.
+# MAGIC The pipeline ingests these PDFs with Auto Loader and runs `ai_parse_document` + `ai_extract` on them.
 # MAGIC
 # MAGIC After all PDFs land, optionally deletes the legacy `.txt` files (controlled by `DELETE_TXT`).
 
@@ -283,7 +284,7 @@ def build_pdf_bytes(raw_text, invoice_id):
 
 # MAGIC %md ## Generate PDFs from canonical ERP data
 # MAGIC
-# MAGIC PDF content is now built from `bronze_p2p_invoices` joined with `bronze_vendors`,
+# MAGIC PDF content is built from the landed invoice extract joined with the vendor master,
 # MAGIC so the vendor name, GSTIN, invoice number, dates, amounts, and PO reference printed
 # MAGIC on the PDF exactly match the ERP record for the same `invoice_id`. Previously the
 # MAGIC PDFs were generated from independently-randomised raw_text and didn't reconcile.
@@ -389,17 +390,27 @@ def _line_items_for(invoice_amount: float, vendor_category: str) -> list[tuple]:
 
 # COMMAND ----------
 
-# Pull canonical ERP data joined with vendor master — for every invoice that has
-# a corresponding bronze_raw_invoice_documents row (the 200 invoices we host PDFs for).
-canonical = spark.sql(f"""
+# Canonical ERP data comes from the landed CSV extracts (the same files the pipeline ingests),
+# joined with the vendor master, so every printed field matches the ERP record for that invoice_id.
+# 200 genuine invoices (not re-submitted duplicates) get a PDF; the sample is deterministic.
+import random as _random
+RAW_CSV = f"/Volumes/{CATALOG}/{SCHEMA}/raw_csv"
+_csv = lambda e: spark.read.option("header", "true").option("escape", '"').option("inferSchema", "true").csv(f"{RAW_CSV}/{e}")
+_csv("p2p_invoices").createOrReplaceTempView("raw_p2p_invoices")
+_csv("vendors").createOrReplaceTempView("raw_vendors")
+_ids = sorted(r[0] for r in spark.sql("SELECT invoice_id FROM raw_p2p_invoices WHERE invoice_id < 'INV900000'").collect())
+_sample = _random.Random(7).sample(_ids, min(200, len(_ids)))
+spark.createDataFrame([(i,) for i in _sample], "invoice_id STRING").createOrReplaceTempView("pdf_sample")
+
+canonical = spark.sql("""
 SELECT
     i.invoice_id,
     i.invoice_number,
     DATE_FORMAT(TO_DATE(i.invoice_date), 'dd-MMM-yyyy')  AS invoice_date,
     DATE_FORMAT(TO_DATE(i.due_date),     'dd-MMM-yyyy')  AS due_date,
-    i.invoice_amount,
-    i.tax_amount,
-    i.total_amount         AS invoice_total_inr,
+    CAST(i.invoice_amount AS DOUBLE)  AS invoice_amount,
+    CAST(i.tax_amount AS DOUBLE)      AS tax_amount,
+    CAST(i.total_amount AS DOUBLE)    AS invoice_total_inr,
     i.po_id,
     i.vendor_id,
     v.vendor_name,
@@ -409,10 +420,9 @@ SELECT
     v.state,
     v.contact_phone,
     v.contact_email
-FROM `{CATALOG}`.`{SCHEMA}`.`bronze_p2p_invoices`         AS i
-LEFT JOIN `{CATALOG}`.`{SCHEMA}`.`bronze_vendors`         AS v
-       ON i.vendor_id = v.vendor_id
-WHERE i.invoice_id IN (SELECT invoice_id FROM `{CATALOG}`.`{SCHEMA}`.`bronze_raw_invoice_documents`)
+FROM raw_p2p_invoices AS i
+JOIN pdf_sample AS s ON i.invoice_id = s.invoice_id
+LEFT JOIN raw_vendors AS v ON i.vendor_id = v.vendor_id
 """).collect()
 
 print(f"Canonical rows pulled: {len(canonical)}")
@@ -426,14 +436,15 @@ CORRUPT_PCT = 3   # ~3% of invoices get corrupted
 def _printed_total(inv_id: str, true_total: float) -> tuple[float, bool, float]:
     """
     Returns (printed_total, corrupted, ratio).
-    ratio = 1.0 for clean rows; in [0.85, 1.15] for corrupted rows.
+    ratio = 1.0 for clean rows; in [0.85, 0.97] or [1.03, 1.15] for corrupted rows.
     """
     h = _crc32(inv_id)
     if h % 100 < CORRUPT_PCT:
         # Map h to ratio in [-0.15, +0.15] in 1% steps, skipping 0.
         delta = ((h % 31) - 15) / 100.0
-        if delta == 0:
-            delta = 0.05
+        # Keep every tamper at least 3% away from the ERP so it is a clear, material signal
+        if abs(delta) < 0.03:
+            delta = 0.05 if delta >= 0 else -0.05
         ratio = 1.0 + delta
         return round(true_total * ratio, 2), True, ratio
     return true_total, False, 1.0
@@ -525,3 +536,9 @@ if DELETE_TXT and len(pdfs) >= len(canonical):
     print(f"Removed {removed} .txt files")
 else:
     print("DELETE_TXT=False (or PDF count short of source row count) — .txt retained")
+
+# COMMAND ----------
+
+import json
+dbutils.notebook.exit(json.dumps({"pdfs_generated": success, "failures": len(failures),
+                                  "tampered_invoices": sorted(r["invoice_id"] for r in corruption_rows)}))
