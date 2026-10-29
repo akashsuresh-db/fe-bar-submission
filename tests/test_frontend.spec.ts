@@ -83,6 +83,8 @@ async function mockAPIs(page: Page) {
           trial_balance: [
             { account_code: "1000", account_name: "Cash", account_type: "ASSET",
               debit: 5000000, credit: 0, balance: 5000000, balance_type: "DR", transactions: 45 },
+            { account_code: "1100", account_name: "Accounts Receivable", account_type: "ASSET",
+              debit: 5000000, credit: 0, balance: 5000000, balance_type: "DR", transactions: 30 },
             { account_code: "2000", account_name: "Accounts Payable", account_type: "LIABILITY",
               debit: 0, credit: 5000000, balance: 5000000, balance_type: "CR", transactions: 30 },
           ],
@@ -136,6 +138,14 @@ const RECON_TIED = {
     },
   ],
 };
+
+/**
+ * The "Log Collection Call" modal. The app gives it no role=dialog or testid,
+ * so anchor on its heading and take the enclosing fixed container.
+ */
+function callLogModal(page: Page) {
+  return page.locator("div.fixed", { has: page.getByRole("heading", { name: "Log Collection Call" }) });
+}
 
 /** Mock SSE stream with predefined events */
 function makeSseBody(events: object[]) {
@@ -282,7 +292,8 @@ test.describe("Application Load", () => {
     await mockAPIs(page);
     await page.goto(BASE_URL);
     await page.locator("button, [role=tab]").filter({ hasText: /GL|R2R/i }).first().click();
-    await expect(page.locator("text=/Journal|Trial Balance|JE/i").first()).toBeVisible({ timeout: 5000 });
+    // "Journal Entries" is a KPI label that exists only in the GL tab (loose /JE/i matched "Rajesh" in the hidden AP tab)
+    await expect(page.getByText("Journal Entries", { exact: true })).toBeVisible({ timeout: 5000 });
   });
 });
 
@@ -503,10 +514,11 @@ test.describe("O2C Tab", () => {
     await page.locator("button").filter({ hasText: /Start Collection Run/i }).click();
     await page.locator("button").filter({ hasText: /Log/i }).first().waitFor({ timeout: 10000 });
     await page.locator("button").filter({ hasText: /Log/i }).first().click();
-    await expect(page.locator("text=/Reached.*PTP/i")).toBeVisible({ timeout: 5000 });
-    await expect(page.locator("text=/Reached.*Dispute/i")).toBeVisible({ timeout: 5000 });
-    await expect(page.locator("text=/Voicemail/i")).toBeVisible({ timeout: 5000 });
-    await expect(page.locator("text=/Escalate/i")).toBeVisible({ timeout: 5000 });
+    const modal = callLogModal(page);
+    await expect(modal.getByRole("button", { name: "Reached - PTP", exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(modal.getByRole("button", { name: "Reached - Dispute", exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(modal.getByRole("button", { name: "Voicemail", exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(modal.getByRole("button", { name: "Escalate", exact: true })).toBeVisible({ timeout: 5000 });
   });
 
   test("selecting PTP outcome shows promise-to-pay date field", async ({ page }) => {
@@ -553,8 +565,9 @@ test.describe("O2C Tab", () => {
     await page.locator("button").filter({ hasText: /Start Collection Run/i }).click();
     await page.locator("button").filter({ hasText: /Log/i }).first().waitFor({ timeout: 10000 });
     await page.locator("button").filter({ hasText: /Log/i }).first().click();
-    await page.locator("[aria-label=close], button:has(svg)").filter({ hasText: "" }).last().click();
-    await expect(page.locator("text=/Log Collection Call/i")).not.toBeVisible({ timeout: 3000 });
+    // The X is the first control in the modal header (outcome buttons follow it)
+    await callLogModal(page).locator("button").first().click();
+    await expect(page.getByRole("heading", { name: "Log Collection Call" })).toBeHidden({ timeout: 3000 });
   });
 
   test("clicking backdrop dismisses modal", async ({ page }) => {
@@ -639,16 +652,26 @@ test.describe("R2R / GL Tab", () => {
     await expect(page.locator("text=/Live Trial Balance/i")).toBeVisible({ timeout: 5000 });
   });
 
+  // The GL recon card also renders a table, so the TB table is identified by its "Balance" column header.
+  function tbTable(page: Page) {
+    return page.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Balance", exact: true }) });
+  }
+
   test("Trial Balance table shows account codes", async ({ page }) => {
     await page.locator("button").filter({ hasText: /Show Trial Balance/i }).click();
-    await expect(page.locator("text=/1000/").first()).toBeVisible({ timeout: 5000 });
-    await expect(page.locator("text=/Cash/").first()).toBeVisible({ timeout: 5000 });
+    const table = tbTable(page);
+    await expect(table.getByText("1100", { exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(table.getByText("Accounts Receivable", { exact: true })).toBeVisible({ timeout: 5000 });
+    // Account 1000 is not one of the nine demo accounts, so the TB view omits it
+    await expect(table.getByText("1000", { exact: true })).toHaveCount(0);
   });
 
   test("Trial Balance table shows DR/CR labels", async ({ page }) => {
     await page.locator("button").filter({ hasText: /Show Trial Balance/i }).click();
-    await expect(page.locator("text=/DR/").first()).toBeVisible({ timeout: 5000 });
-    await expect(page.locator("text=/CR/").first()).toBeVisible({ timeout: 5000 });
+    const table = tbTable(page);
+    // Balance column renders "<amount> DR" or "<amount> CR"
+    await expect(table.getByRole("cell", { name: /DR$/ })).toBeVisible({ timeout: 5000 });
+    await expect(table.getByRole("cell", { name: /CR$/ })).toBeVisible({ timeout: 5000 });
   });
 
   test("clicking Hide Trial Balance reverts to JE feed", async ({ page }) => {
@@ -749,14 +772,17 @@ test.describe("AI Chat Panel", () => {
     await input.fill("What is DPO?");
     await input.press("Enter");
     await expect(page.locator("text=/38.2 days/i").first()).toBeVisible({ timeout: 10000 });
-    // Now click New Chat
-    await page.locator("button").filter({ hasText: /New Chat|New Session/i }).first().click();
-    await expect(page.locator("text=/What is DPO/")).not.toBeVisible({ timeout: 3000 });
+    // Now click New session (icon-only header button, identified by its title)
+    await page.getByTitle("New session").click();
+    await expect(page.getByText("Finance AI Assistant", { exact: true })).toBeVisible({ timeout: 3000 });
+    await expect(page.getByText("What is DPO?", { exact: true })).toHaveCount(0);
   });
 
   test("History button shows session list panel", async ({ page }) => {
-    await page.locator("button").filter({ hasText: /History|Sessions/i }).first().click();
-    await expect(page.locator("text=/No sessions|Previous|History/i").first()).toBeVisible({ timeout: 5000 });
+    // Icon-only header button, identified by its title
+    await page.getByTitle("Session history").click();
+    await expect(page.getByText("Chat History", { exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText("No past sessions yet")).toBeVisible({ timeout: 5000 });
   });
 
   test("chat calls POST /api/chat with correct payload", async ({ page }) => {
@@ -796,25 +822,29 @@ test.describe("Exception Drawer", () => {
     await page.goto(BASE_URL);
   });
 
+  // The exception list item carries .exception-flash. The old [class*='bg-db-red'] fallback
+  // matched the red "Escalate" button in the Exceptions header, which opened the escalate modal instead.
   test("clicking exception in panel opens drawer", async ({ page }) => {
     await page.locator("button").filter({ hasText: /Start Processing/i }).click();
-    await page.locator(".exception-flash, [class*='bg-db-red']").first().waitFor({ timeout: 10000 });
-    await page.locator(".exception-flash, [class*='bg-db-red']").first().click();
-    await expect(page.locator("text=/Exception|Quarantine|reason/i").first()).toBeVisible({ timeout: 5000 });
+    await page.locator(".exception-flash").first().waitFor({ timeout: 10000 });
+    await page.locator(".exception-flash").first().click();
+    await expect(page.getByText("Quarantine Alert", { exact: true })).toBeVisible({ timeout: 5000 });
   });
 
   test("drawer shows exception severity", async ({ page }) => {
     await page.locator("button").filter({ hasText: /Start Processing/i }).click();
-    await page.locator(".exception-flash, [class*='bg-db-red']").first().waitFor({ timeout: 10000 });
-    await page.locator(".exception-flash, [class*='bg-db-red']").first().click();
-    await expect(page.locator("text=/high|critical|medium/i").first()).toBeVisible({ timeout: 5000 });
+    await page.locator(".exception-flash").first().waitFor({ timeout: 10000 });
+    await page.locator(".exception-flash").first().click();
+    // The drawer is the fixed right-hand panel; the exception list also shows a "high" badge
+    await expect(page.locator("div.fixed.right-0").getByText("high", { exact: true })).toBeVisible({ timeout: 5000 });
   });
 
   test("drawer shows resolution text", async ({ page }) => {
     await page.locator("button").filter({ hasText: /Start Processing/i }).click();
-    await page.locator(".exception-flash, [class*='bg-db-red']").first().waitFor({ timeout: 10000 });
-    await page.locator(".exception-flash, [class*='bg-db-red']").first().click();
-    await expect(page.locator("text=/resolution|Compare|Contact/i").first()).toBeVisible({ timeout: 5000 });
+    await page.locator(".exception-flash").first().waitFor({ timeout: 10000 });
+    await page.locator(".exception-flash").first().click();
+    await expect(page.getByText("Recommended Action", { exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText("Compare invoice line items against PO PO-001.")).toBeVisible({ timeout: 5000 });
   });
 
   test("drawer close button dismisses it", async ({ page }) => {
@@ -889,10 +919,13 @@ test.describe("Responsiveness", () => {
     await page.setViewportSize({ width: 375, height: 812 });
     await mockAPIs(page);
     await page.goto(BASE_URL);
+    // At 375px the fixed 380px AI panel takes the full width and <main> collapses to ~32px,
+    // so the tab content is hidden while the panel is open. Close the panel first (a user action).
+    await page.getByTitle("Close AI Panel").click();
     const arTab = page.locator("button, [role=tab]").filter({ hasText: /AR|O2C/i }).first();
     await arTab.scrollIntoViewIfNeeded();
     await arTab.click();
-    await expect(page.locator("text=/DSO|Outstanding/i").first()).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText("AR Outstanding", { exact: true })).toBeVisible({ timeout: 5000 });
   });
 });
 

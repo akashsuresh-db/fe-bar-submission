@@ -22,8 +22,16 @@ Two suites cover the app. Both run without a workspace when mocked; the deployed
 
 ## Known pre-existing frontend test failures
 
-Nine tests in `tests/test_frontend.spec.ts` fail on the baseline UI (fins-demo `d033c92`) as well as on the current build. They use loose text locators that resolve to hidden elements of other mounted tabs (for example `/JE/i` matches "Rajesh"):
-`can switch to R2R tab`, `call log modal shows four outcome options`, `modal close (X) button dismisses modal`, `Trial Balance table shows account codes`, `Trial Balance table shows DR/CR labels`, `New Chat button clears conversation`, `History button shows session list panel`, `drawer shows resolution text`, `tab navigation still works on small viewport`.
+The nine tests that failed in `tests/test_frontend.spec.ts` (loose text locators matching hidden elements of other mounted tabs, for example `/JE/i` matching "Rajesh") are fixed. The frontend suite now runs 80 passed, 0 failed, 10 skipped (the skipped tests are the deployed-app spec). Fixes, by test:
+
+- `can switch to R2R tab`: asserts the GL-only KPI label "Journal Entries" (exact match).
+- `call log modal shows four outcome options`: scopes the outcome buttons to the "Log Collection Call" modal, found by its heading. Previously the hidden AP "Escalate" button caused a strict-mode violation.
+- `modal close (X) button dismisses modal`: clicks the modal's header X, not the last SVG button in the page (which sat in the AI chat panel).
+- `Trial Balance table shows account codes` and `... DR/CR labels`: scope to the TB table (identified by its "Balance" header, since the GL recon card is also a table). The mock gained a demo account (1100, DR). The TB view shows only the nine demo accounts, so the test now asserts 1100 is shown and 1000 is omitted.
+- `New Chat button clears conversation`: uses the icon-only header button by title "New session" and asserts the empty-state text returns.
+- `History button shows session list panel`: uses the title "Session history" and asserts "Chat History" and "No past sessions yet".
+- `drawer shows resolution text` (and the other Exception Drawer tests): click `.exception-flash` (the exception list item). The old `[class*='bg-db-red']` fallback matched the red Escalate button, which opened the escalate modal instead of the drawer.
+- `tab navigation still works on small viewport`: at 375px the fixed 380px AI panel collapses `<main>` to about 32px, so the test closes the AI panel ("Close AI Panel") before switching tabs. This is a layout limitation of the app at phone widths, not a test defect; the app code was not changed.
 
 ## Troubleshooting streams (SSE)
 
