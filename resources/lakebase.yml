@@ -1,0 +1,6 @@
+# Lakebase (managed Postgres) instance for the app's operational state and the synced AP queue.
+resources:
+  database_instances:
+    fna_lakebase:
+      name: ${var.lakebase_instance_name}
+      capacity: CU_1
