@@ -62,6 +62,9 @@ def _fresh_token() -> str:
     return os.environ.get("PGPASSWORD") or os.environ.get("LAKEBASE_PASSWORD", "")
 
 
+APP_PG_SCHEMA = os.environ.get("LAKEBASE_APP_SCHEMA", "fna_app")
+
+
 def _get_conn():
     """Get a psycopg2 connection to Lakebase with a freshly generated token."""
     import psycopg2
@@ -72,10 +75,13 @@ def _get_conn():
         user=os.environ.get("PGUSER") or os.environ.get("LAKEBASE_USER"),
         password=_fresh_token(),
         sslmode=os.environ.get("PGSSLMODE", "require"),
+        # App-owned tables live in their own schema: PostgreSQL 15+ does not let non-owners create in public
+        options=f"-c search_path={APP_PG_SCHEMA},public",
     )
 
 
 _DDL_STATEMENTS = [
+    f"CREATE SCHEMA IF NOT EXISTS {APP_PG_SCHEMA}",
     """CREATE TABLE IF NOT EXISTS ap_approvals (
         id SERIAL PRIMARY KEY,
         invoice_id VARCHAR(50),
@@ -453,7 +459,7 @@ def _queue_table_sql() -> str:
 def get_ap_exception_queue(limit: int = 200, invoice_id: str | None = None) -> list[dict[str, Any]] | None:
     """Read the AP exception queue from the Lakebase synced table (Gold → Postgres).
 
-    The latest approval action recorded by the app (public.ap_approvals, same
+    The latest approval action recorded by the app (ap_approvals in the app schema, same
     database) is joined in, so the queue shows what has already been actioned.
     Returns None when Lakebase is not connected or the synced table is missing,
     so the caller can fall back to the warehouse and say so.
@@ -472,7 +478,7 @@ def get_ap_exception_queue(limit: int = 200, invoice_id: str | None = None) -> l
                                a.approved_at AS last_action_at
                         FROM {_queue_table_sql()} q
                         LEFT JOIN LATERAL (
-                            SELECT action, approved_by, approved_at FROM public.ap_approvals
+                            SELECT action, approved_by, approved_at FROM ap_approvals
                             WHERE invoice_id = q.invoice_id ORDER BY approved_at DESC LIMIT 1
                         ) a ON true
                         {where}

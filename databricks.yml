@@ -38,13 +38,13 @@ variables:
     default: databricks_postgres
   genie_space_id:
     description: Genie space id (output of the setup job's genie_space task; set by setup/setup.sh)
-    default: ""
+    default: none
   llm_endpoint:
     description: Foundation Model API endpoint used for summaries and the last-resort chat fallback
     default: databricks-claude-sonnet-4-5
   mas_endpoint_name:
-    description: Optional Agent Bricks supervisor endpoint; when empty the app chat routes to Genie
-    default: ""
+    description: Optional Agent Bricks supervisor endpoint; "none" routes the app chat to Genie
+    default: none
 
 include:
   - resources/*.yml

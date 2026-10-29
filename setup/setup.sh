@@ -4,6 +4,7 @@
 #
 # Usage (host comes from DATABRICKS_HOST or a -p profile — never hardcoded):
 #   ./setup/setup.sh -p <profile> --var="catalog=<catalog>" --var="schema=<schema>" --var="warehouse_id=<id>"
+#   SETUP_RUN_ID=<run id> ./setup/setup.sh ...   # skip the job and wire the app from an existing run
 #
 # Steps:
 #   1. validate + deploy (pipeline, jobs, Lakebase instance, app)
@@ -30,10 +31,18 @@ echo "==> [1/4] Validating and deploying the bundle (target: $TARGET)"
 databricks bundle validate -t "$TARGET" "$@"
 databricks bundle deploy -t "$TARGET" "$@"
 
-echo "==> [2/4] Running the setup job"
-RUN_JSON=$(databricks bundle run fna_setup_job -t "$TARGET" "$@" -o json)
-RUN_ID=$(echo "$RUN_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
-echo "    setup run $RUN_ID finished"
+if [[ -n "${SETUP_RUN_ID:-}" ]]; then
+  # Resume wiring from an existing successful setup run
+  RUN_ID="$SETUP_RUN_ID"
+  echo "==> [2/4] Reusing setup run $RUN_ID"
+else
+  echo "==> [2/4] Running the setup job"
+  RUN_LOG=$(mktemp)
+  databricks bundle run fna_setup_job -t "$TARGET" "$@" 2>&1 | tee "$RUN_LOG"
+  RUN_ID=$(grep -oE '/runs/[0-9]+' "$RUN_LOG" | head -1 | cut -d/ -f3)
+  grep -q "TERMINATED SUCCESS" "$RUN_LOG" || { echo "setup job did not succeed (run $RUN_ID)"; exit 1; }
+  echo "    setup run $RUN_ID finished"
+fi
 
 echo "==> [3/4] Wiring the Genie space into the app"
 GENIE_TASK_RUN=$(databricks jobs get-run "$RUN_ID" "${PROFILE_ARGS[@]}" -o json | python3 -c \

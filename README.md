@@ -11,8 +11,8 @@ keyed and matched by hand (a touchless rate of about a third), duplicate and tam
 payment if at all, collections teams chase from stale aging lists, and the month-end tie-out of the sub-ledgers to
 the general ledger takes days of manual reconciliation.
 
-**The value case (estimated).** About **$2.8M a year** across four levers, plus **$16M of cash released** by a
-5-day DSO reduction, about **11x** the estimated platform cost of $0.25M a year.
+**The value case (estimated).** About **$2.8M a year** across four levers, about **11x** the estimated platform
+cost of $0.25M a year. A 5-day DSO reduction also releases **$16M of cash** once; its carrying value is one of the levers.
 
 | Lever | Sizing basis (estimate) | Annual value |
 |---|---|---|
@@ -28,12 +28,12 @@ Invoice cost benchmark: Ardent Partners ePayables. All inputs are illustrative e
 
 | Result | Value |
 |---|---|
-| Touchless rate (clean three-way match, not release-blocked) | ⟦touchless⟧ |
-| Duplicate invoices blocked before payment | ⟦dups⟧ |
-| Value held for review in the exception queue | ⟦held⟧ |
-| Tampered invoice PDFs caught by the AI control | ⟦tamper⟧ |
+| Touchless rate (clean three-way match, not release-blocked) | 34.4% (189 of 550 invoices) |
+| Duplicate invoices blocked before payment | 27 (₹26.77 Cr) |
+| Value held for review in the exception queue | 407 invoices (₹410.24 Cr) |
+| Tampered invoice PDFs caught by the AI control | 3 of 3, with 0 clean invoices blocked |
 | AI extraction accuracy (total / PO / GSTIN) | ⟦accuracy⟧ |
-| Sub-ledger to GL reconciliation | ⟦recon⟧ |
+| Sub-ledger to GL reconciliation | Tied: AR ₹1.53 Cr and AP ₹0.80 Cr differences fully explained by 4 named items; unexplained ₹0 |
 | Trial balance | Balances in every period (DR = CR) |
 
 ## 2. Architecture

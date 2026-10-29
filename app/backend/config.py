@@ -5,7 +5,13 @@ import contextvars
 IS_DATABRICKS_APP = bool(os.environ.get("DATABRICKS_APP_NAME"))
 
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
-GENIE_SPACE_ID = os.environ.get("GENIE_SPACE_ID", "")
+def optional_env(name: str) -> str:
+    """Optional ids arrive from the bundle as "none" when unset (app env values cannot be empty)."""
+    v = os.environ.get(name, "").strip()
+    return "" if v.lower() in ("", "none") else v
+
+
+GENIE_SPACE_ID = optional_env("GENIE_SPACE_ID")
 CATALOG = os.environ.get("DATABRICKS_CATALOG", "fna_control_tower_catalog")
 SCHEMA = os.environ.get("DATABRICKS_SCHEMA", "finance_and_accounting")
 

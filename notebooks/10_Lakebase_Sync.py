@@ -5,8 +5,8 @@
 # MAGIC 1. **Gold → Lakebase.** Ensures the Postgres database exists, then creates (or refreshes) the synced table
 # MAGIC    `<catalog>.<schema>.ap_exception_queue` from `gold_ap_exception_queue`. Postgres serves it as
 # MAGIC    `"<schema>"."ap_exception_queue"`; the app's AP queue and exception drawer read it at OLTP latency.
-# MAGIC 2. **Lakebase → Unity Catalog.** Copies the app's operational writes (`ap_approvals`, `ar_call_logs`,
-# MAGIC    `chat_history`) into `ops_*` Delta tables, so Genie and the Gold KPIs can count approvals and
+# MAGIC 2. **Lakebase → Unity Catalog.** Copies the app's operational writes (`fna_app.ap_approvals`, `fna_app.ar_call_logs`,
+# MAGIC    `fna_app.chat_history`) into `ops_*` Delta tables, so Genie and the Gold KPIs can count approvals and
 # MAGIC    promises-to-pay. (Registering the database as a UC catalog needs `CREATE CATALOG` on the metastore,
 # MAGIC    which the FEVM workspace does not grant; this task is the documented substitute.)
 
@@ -31,6 +31,7 @@ INSTANCE = dbutils.widgets.get("instance_name")
 DATABASE = dbutils.widgets.get("database_name")
 MODE = dbutils.widgets.get("mode")
 FQ = f"{CATALOG}.{SCHEMA}"
+APP_SCHEMA = "fna_app"  # Postgres schema owned by the app (app/backend/lakebase.py)
 
 import json, time, uuid
 import psycopg
@@ -96,6 +97,12 @@ if MODE in ("all", "sync"):
         except Exception as e:
             last = str(e)[:150]
         time.sleep(20)
+    # The app's Postgres role reads the synced queue; instance access itself is governed by Databricks permissions
+    conn = pg(DATABASE)
+    with conn.cursor() as cur:
+        cur.execute(f'GRANT USAGE ON SCHEMA "{SCHEMA}" TO PUBLIC')
+        cur.execute(f'GRANT SELECT ON ALL TABLES IN SCHEMA "{SCHEMA}" TO PUBLIC')
+    conn.close()
     report.update({"synced_table": SYNCED, "synced_action": action,
                    "postgres_table": f'"{SCHEMA}"."ap_exception_queue"', "postgres_rows": rows})
     if not rows:
@@ -115,12 +122,12 @@ if MODE in ("all", "writeback"):
     conn = pg(DATABASE)
     for table in ("ap_approvals", "ar_call_logs", "chat_history"):
         with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
+            cur.execute("SELECT to_regclass(%s)", (f"{APP_SCHEMA}.{table}",))
             if cur.fetchone()[0] is None:
                 copied[table] = "not created yet (app has not started)"
                 continue
         with conn.cursor() as cur:
-            cur.execute(f"SELECT * FROM public.{table}")
+            cur.execute(f"SELECT * FROM {APP_SCHEMA}.{table}")
             df = pd.DataFrame(cur.fetchall(), columns=[d.name for d in cur.description])
         target = f"{FQ}.ops_{table}"
         if len(df):
@@ -128,7 +135,7 @@ if MODE in ("all", "writeback"):
             sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
         else:
             spark.sql(f"CREATE TABLE IF NOT EXISTS {target} (placeholder STRING)")
-        spark.sql(f"COMMENT ON TABLE {target} IS 'Copied from Lakebase {DATABASE}.public.{table} by 10_Lakebase_Sync.'")
+        spark.sql(f"COMMENT ON TABLE {target} IS 'Copied from Lakebase {DATABASE}.{APP_SCHEMA}.{table} by 10_Lakebase_Sync.'")
         copied[table] = len(df)
     conn.close()
     report["writeback_rows"] = copied

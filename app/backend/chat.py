@@ -20,10 +20,10 @@ import os
 import re
 import aiohttp
 from backend import db
-from backend.config import get_workspace_host, get_token, CATALOG, SCHEMA, GENIE_SPACE_ID
+from backend.config import get_workspace_host, get_token, CATALOG, SCHEMA, GENIE_SPACE_ID, optional_env
 from backend.sql_guard import guard_sql, SqlGuardError
 
-MAS_ENDPOINT = os.environ.get("MAS_ENDPOINT_NAME", "")
+MAS_ENDPOINT = optional_env("MAS_ENDPOINT_NAME")
 AGENT_ENDPOINT = (MAS_ENDPOINT
                   or (f"genie-space:{GENIE_SPACE_ID}" if GENIE_SPACE_ID else "")
                   or "finance-sql-agent (Claude + guarded SQL fallback)")
