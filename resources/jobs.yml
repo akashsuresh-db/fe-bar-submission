@@ -1,0 +1,105 @@
+# Setup / build job: generates synthetic data, runs the DLT pipeline, builds the
+# gold layer, and runs the AI invoice extraction. Notebook tasks run on serverless
+# compute and receive catalog/schema as parameters (no hardcoded values).
+resources:
+  jobs:
+    fna_setup_job:
+      name: "cfo-fna-control-tower-setup-${bundle.target}"
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+      tasks:
+        # Idempotent re-run guard: drop all tables/views so data-gen can rebuild
+        # (DLT-owned streaming tables/MVs from a prior run block CREATE OR REPLACE).
+        - task_key: reset_schema
+          notebook_task:
+            notebook_path: ../notebooks/00a_Reset_Schema.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+        - task_key: generate_data
+          depends_on:
+            - task_key: reset_schema
+          notebook_task:
+            notebook_path: ../notebooks/00_Setup_and_Data_Generation.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+        - task_key: generate_pdf_invoices
+          depends_on:
+            - task_key: generate_data
+          notebook_task:
+            notebook_path: ../notebooks/01a_Generate_PDF_Invoices.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+        - task_key: export_raw_csv
+          depends_on:
+            - task_key: generate_data
+          notebook_task:
+            notebook_path: ../notebooks/00b_Export_Raw_CSV.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+        # Clear DLT-owned bronze tables (written as staging by data-gen / PDF gen) and
+        # bootstrap silver_invoice_extractions so the DLT pipeline can materialise cleanly.
+        # Runs after both the CSV export and PDF generation so it never races their writes.
+        - task_key: cleanup_dlt_bronze
+          depends_on:
+            - task_key: export_raw_csv
+            - task_key: generate_pdf_invoices
+          notebook_task:
+            notebook_path: ../notebooks/00c_Drop_DLT_Bronze.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+        - task_key: run_dlt_pipeline
+          depends_on:
+            - task_key: cleanup_dlt_bronze
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.fna_dlt_pipeline.id}
+
+        # NOTE: the DLT pipeline (notebooks/01_DLT_Pipeline.py) produces the full
+        # bronze -> silver -> gold layer, including every gold_* table the app reads.
+        # The standalone gold notebooks (02/03/04) are a legacy path that expects
+        # silver_vendors etc. (not emitted by this pipeline), so they are intentionally
+        # NOT part of this job — gold comes from DLT.
+
+        # AI invoice extraction: ai_parse_document + ai_extract over the PDF volume,
+        # writing silver_invoice_extractions. Depends on DLT (needs bronze_p2p_invoices
+        # and bronze_raw_invoice_documents, which the pipeline owns).
+        - task_key: ai_invoice_processing
+          depends_on:
+            - task_key: run_dlt_pipeline
+          notebook_task:
+            notebook_path: ../notebooks/05_Invoice_AI_Processing.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+        # Refresh DLT so silver_p2p_invoices / gold_fact_invoices pick up the AI
+        # extractions (surfaces the extraction-mismatch exceptions in the app).
+        - task_key: dlt_refresh_with_extractions
+          depends_on:
+            - task_key: ai_invoice_processing
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.fna_dlt_pipeline.id}
+
+    # Teardown job: drops the demo catalog (and everything in it). Run this before
+    # `databricks bundle destroy` to remove UC data that the bundle does not own.
+    fna_teardown_job:
+      name: "cfo-fna-control-tower-teardown-${bundle.target}"
+      tasks:
+        - task_key: drop_catalog
+          notebook_task:
+            notebook_path: ../setup/teardown_catalog.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}

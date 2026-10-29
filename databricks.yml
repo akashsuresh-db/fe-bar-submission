@@ -1,0 +1,45 @@
+# Databricks Asset Bundle for the Finance & Accounting Ops Control Tower demo.
+#
+# Deployable components covered by this bundle:
+#   - Spark Declarative (DLT) pipeline .... resources/pipelines.yml
+#   - Setup job (data gen -> DLT -> gold -> AI) .. resources/jobs.yml
+#   - Databricks App (FastAPI + React) ......... resources/apps.yml
+#
+# Components that cannot be deployed via a bundle (Genie space, MAS / AgentBricks
+# endpoint, Lakebase instance, Vector Search) are documented in MANUAL_DEPLOY.md.
+#
+# Quick start:
+#   export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com   # or use -p <profile>
+#   databricks bundle validate -t dev
+#   ./setup/setup.sh        # deploy + populate the demo
+#   ./setup/teardown.sh     # remove everything this bundle created
+#
+# The workspace host is NOT hardcoded here: the Databricks CLI does not allow
+# variable interpolation for `workspace.host`, so it is supplied at runtime via
+# the DATABRICKS_HOST env var or a `-p <profile>` flag. Everything else is a variable.
+bundle:
+  name: cfo-fna-ops-control-tower
+
+variables:
+  catalog:
+    description: Unity Catalog catalog that holds the demo data
+    default: fna_control_tower_catalog
+  schema:
+    description: Schema within the catalog
+    default: finance_and_accounting
+  warehouse_id:
+    description: Existing SQL warehouse ID used by the app (and Genie space)
+    default: ""
+  lakebase_instance_name:
+    description: Lakebase (managed Postgres) instance name backing the app
+    default: finance-ops-db
+
+include:
+  - resources/*.yml
+
+targets:
+  # Dev is the only target today; a prod target is added at promotion time.
+  # Host comes from DATABRICKS_HOST / the active CLI profile (see header note).
+  dev:
+    mode: development
+    default: true

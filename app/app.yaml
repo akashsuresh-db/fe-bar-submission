@@ -1,0 +1,25 @@
+command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+env:
+  # Warehouse ID is injected from the SQL warehouse resource attached in databricks.yml.
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "d5080ca821238922"
+  # Genie space + MAS supervisor endpoint are provisioned manually (see MANUAL_DEPLOY.md).
+  # Populate these once those assets exist in the target workspace.
+  - name: GENIE_SPACE_ID
+    value: ""
+  - name: MAS_ENDPOINT_NAME
+    value: ""
+  - name: DATABRICKS_CATALOG
+    value: "proserv"
+  - name: DATABRICKS_SCHEMA
+    value: "finance_ops_control_tower"
+  # Lakebase (Postgres): PGHOST / PGUSER / PGPASSWORD are injected by the attached
+  # database resource in databricks.yml. Only non-sensitive config is set here.
+  - name: LAKEBASE_INSTANCE_NAME
+    value: "finance-ops-db"
+  - name: PGDATABASE
+    value: "finance_ops_app"
+  - name: PGPORT
+    value: "5432"
+  - name: PGSSLMODE
+    value: "require"
