@@ -13,7 +13,7 @@ import ExceptionDrawer from "./ExceptionDrawer";
 import InvoiceDrawer from "./InvoiceDrawer";
 import SummaryCard from "./SummaryCard";
 import TopSummaryCard from "./TopSummaryCard";
-import { inr, matchStatusColor, matchStatusBg, matchStatusLabel, formatNum } from "../utils";
+import { inr, matchStatusColor, matchStatusBg, matchStatusLabel, formatNum, dash } from "../utils";
 
 type P2PMetrics = {
   metrics: {
@@ -28,6 +28,9 @@ type P2PMetrics = {
     overdue_amount: number;
     avg_aging_days: number;
     touchless_rate: number;
+    touchless?: number;
+    release_blocked?: number;
+    release_blocked_amount?: number;
   };
   payment_run: {
     total_payments: number;
@@ -53,11 +56,12 @@ export default function APTab({ userName = "User", onNotify }: Props) {
   const [escalating, setEscalating] = useState(false);
   const [showEscalateModal, setShowEscalateModal] = useState(false);
   const [escalateTypes, setEscalateTypes] = useState<Set<string>>(
-    new Set(["AMOUNT_MISMATCH", "NO_PO_REFERENCE", "CRITICAL_OVERDUE", "MISSING_GSTIN"])
+    new Set(["EXTRACTION_MISMATCH", "AMOUNT_MISMATCH", "NO_PO_REFERENCE", "CRITICAL_OVERDUE", "MISSING_GSTIN"])
   );
   const feedRef = useRef<HTMLDivElement>(null);
 
   const EXCEPTION_OPTIONS = [
+    { key: "EXTRACTION_MISMATCH", label: "Release Blocked (PDF ≠ ERP)", severity: "CRITICAL", color: "text-db-red" },
     { key: "AMOUNT_MISMATCH",  label: "Amount Mismatch",          severity: "HIGH",     color: "text-db-amber" },
     { key: "NO_PO_REFERENCE",  label: "No PO Reference",          severity: "HIGH",     color: "text-db-amber" },
     { key: "CRITICAL_OVERDUE", label: "Critical Overdue (>60d)",  severity: "CRITICAL", color: "text-db-red"   },
@@ -130,16 +134,17 @@ export default function APTab({ userName = "User", onNotify }: Props) {
       <TopSummaryCard tab="P2P" />
 
       {/* KPI Strip */}
-      {m && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <MetricCard label="Total Invoices" value={formatNum(m.total_invoices)} icon={<FileText className="w-4 h-4" />} />
-          <MetricCard label="3-Way Matched" value={formatNum(m.matched)} color="text-db-green" icon={<CheckCircle2 className="w-4 h-4" />} />
-          <MetricCard label="Exceptions" value={formatNum(m.exceptions)} color="text-db-red" icon={<AlertTriangle className="w-4 h-4" />} />
-          <MetricCard label="Touchless Rate" value={`${m.touchless_rate}%`} color="text-db-blue" icon={<Shield className="w-4 h-4" />} />
-          <MetricCard label="Overdue" value={formatNum(m.overdue_count)} color="text-db-amber" sub={inr(m.overdue_amount)} icon={<Clock className="w-4 h-4" />} />
-          <MetricCard label="Avg Aging" value={`${m.avg_aging_days} days`} color="text-text-primary" icon={<ArrowUpRight className="w-4 h-4" />} />
-        </div>
-      )}
+      {/* KPIs show "—" (never invented numbers) when the backend is not serving live rows */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <MetricCard label="Total Invoices" value={dash(m?.total_invoices, formatNum)} icon={<FileText className="w-4 h-4" />} />
+        <MetricCard label="3-Way Matched" value={dash(m?.matched, formatNum)} color="text-db-green" icon={<CheckCircle2 className="w-4 h-4" />} />
+        <MetricCard label="Exceptions" value={dash(m?.exceptions, formatNum)} color="text-db-red" icon={<AlertTriangle className="w-4 h-4" />} />
+        <MetricCard label="Touchless Rate" value={dash(m?.touchless_rate, (v) => `${v}%`)} color="text-db-blue"
+          sub={m?.release_blocked !== undefined ? `excl. ${m.release_blocked} blocked: PDF ≠ ERP` : undefined}
+          icon={<Shield className="w-4 h-4" />} />
+        <MetricCard label="Overdue" value={dash(m?.overdue_count, formatNum)} color="text-db-amber" sub={m ? inr(m.overdue_amount) : undefined} icon={<Clock className="w-4 h-4" />} />
+        <MetricCard label="Avg Aging" value={dash(m?.avg_aging_days, (v) => `${v} days`)} color="text-text-primary" icon={<ArrowUpRight className="w-4 h-4" />} />
+      </div>
 
       {/* Control bar */}
       <div className="flex items-center gap-3">
@@ -202,7 +207,8 @@ export default function APTab({ userName = "User", onNotify }: Props) {
                 const status = (d.match_status || "") as string;
                 const invId = d.invoice_id as string;
                 const isActioned = approvedIds.has(invId);
-                const needsAction = status === "AMOUNT_MISMATCH" || status === "NO_PO_REFERENCE";
+                const blocked = String(d.release_blocked) === "true";
+                const needsAction = blocked || status === "AMOUNT_MISMATCH" || status === "NO_PO_REFERENCE";
                 return (
                   <motion.div
                     key={`${d.invoice_id}-${i}`}
@@ -211,8 +217,8 @@ export default function APTab({ userName = "User", onNotify }: Props) {
                     transition={{ duration: 0.3 }}
                     className={`px-3 py-2.5 rounded-lg border cursor-pointer hover:bg-bg-hover/50 transition ${
                       isActioned ? "border-db-green/30 bg-db-green/5" :
-                      status === "THREE_WAY_MATCHED" ? "match-success" : ""
-                    } ${isActioned ? "" : matchStatusBg(status)}`}
+                      blocked ? "" : status === "THREE_WAY_MATCHED" ? "match-success" : ""
+                    } ${isActioned ? "" : blocked ? "bg-db-red/15 border-db-red/40" : matchStatusBg(status)}`}
                     onClick={() => {
                       const exc = stream.exceptions.find(
                         (e) => (e.data as Record<string, unknown>).invoice_id === d.invoice_id
@@ -241,6 +247,14 @@ export default function APTab({ userName = "User", onNotify }: Props) {
                         {isActioned ? (
                           <span className="text-xs font-medium px-2 py-0.5 rounded text-db-green">
                             Actioned
+                          </span>
+                        ) : blocked ? (
+                          <span
+                            data-testid="release-blocked-badge"
+                            title={(d.block_reason as string) || "AI-extracted PDF total disagrees with the ERP"}
+                            className="text-xs font-bold px-2 py-0.5 rounded bg-db-red/20 text-db-red"
+                          >
+                            Blocked: PDF ≠ ERP
                           </span>
                         ) : (
                           <span className={`text-xs font-medium px-2 py-0.5 rounded ${matchStatusColor(status)}`}>

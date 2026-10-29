@@ -15,7 +15,7 @@ import InvoiceDrawer from "./InvoiceDrawer";
 type ChatMessage = {
   role: "user" | "assistant";
   content: string;
-  routing?: { domain: string; explanation: string; tool?: string; fallback?: boolean };
+  routing?: { domain: string; explanation: string; tool?: string; fallback?: boolean; route?: string; auth?: string };
   sql?: string;
   data?: { columns: string[]; rows: Record<string, string>[] };
   error?: string;
@@ -518,6 +518,7 @@ export default function AIChatPanel({ activeTab, userName }: Props) {
                       streaming: false,
                       routing: data.routing as ChatMessage["routing"],
                       agent: data.agent as string,
+                      sql: (data.sql as string) || undefined,
                     },
                   ];
                 });
@@ -672,17 +673,23 @@ export default function AIChatPanel({ activeTab, userName }: Props) {
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-card border border-border-subtle text-[10px] text-text-muted">
                           <GitBranch className="w-2.5 h-2.5" />
-                          <span>Supervisor</span>
+                          <span>{msg.routing.route === "mas" ? "Supervisor" : "Router"}</span>
                         </div>
                         <span className="text-text-muted text-[10px]">→</span>
-                        <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-medium ${DOMAIN_COLORS[msg.routing.domain] || DOMAIN_COLORS.FULL}`}>
-                          {agentLabel(msg.agent, msg.routing.tool)}
-                        </div>
-                        <span className="text-text-muted text-[10px]">→</span>
-                        <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-card border border-border-subtle text-[10px] text-text-muted">
+                        <div
+                          data-testid="chat-route"
+                          className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-medium ${DOMAIN_COLORS[msg.routing.domain] || DOMAIN_COLORS.FULL}`}
+                        >
                           <Database className="w-2.5 h-2.5" />
-                          <span>Genie</span>
+                          {msg.routing.route === "genie" ? "Genie Agent"
+                            : msg.routing.route === "sql_agent" ? "SQL agent (guarded)"
+                            : agentLabel(msg.agent, msg.routing.tool)}
                         </div>
+                        {msg.routing.auth && (
+                          <span className="text-[10px] text-text-muted" title="obo = query ran as you; sp = app service principal">
+                            as {msg.routing.auth === "obo" ? "you" : "app"}
+                          </span>
+                        )}
                         {msg.routing.fallback && (
                           <span className="text-[10px] text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded-full">fallback</span>
                         )}

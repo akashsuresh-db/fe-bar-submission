@@ -1,6 +1,6 @@
 # Databricks App — FastAPI backend + prebuilt React frontend (app/backend/static).
 # Runtime command and env are declared here (config block) so catalog, schema and resource ids come from
-# bundle variables; resource-backed values use valueFrom.
+# bundle variables (rendered into app.yaml at deploy); resource-backed values use value_from.
 resources:
   apps:
     fna_control_tower_app:
@@ -12,6 +12,8 @@ resources:
       user_api_scopes:
         - sql
         - dashboards.genie
+        - serving.serving-endpoints
+        - files.files
       config:
         command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
         env:
@@ -21,7 +23,7 @@ resources:
             value: ${var.genie_space_id}
           - name: MAS_ENDPOINT_NAME
             value: ${var.mas_endpoint_name}
-          - name: LLM_ENDPOINT
+          - name: FMAPI_MODEL
             value: ${var.llm_endpoint}
           - name: DATABRICKS_CATALOG
             value: ${var.catalog}

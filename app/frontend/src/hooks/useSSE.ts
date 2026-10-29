@@ -60,6 +60,16 @@ export function useSSE(url: string | null) {
             case "progress":
               setProgress(parsed.data);
               break;
+            case "error": {
+              // Typed backend error (e.g. warehouse_unavailable) — never fake rows.
+              const d = parsed.data as Record<string, unknown>;
+              setError(d.error === "warehouse_unavailable"
+                ? "Warehouse starting — data unavailable. Retry in a moment."
+                : `Data unavailable: ${String(d.message ?? d.error ?? "unknown error")}`);
+              setIsStreaming(false);
+              es.close();
+              break;
+            }
             case "checklist_update":
               setChecklist((parsed.data as Record<string, unknown>).checklist as unknown[]);
               break;

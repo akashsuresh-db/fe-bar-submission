@@ -12,31 +12,32 @@ from pydantic import BaseModel
 
 from backend import db
 from backend.streams import stream_p2p, stream_o2c, stream_r2r
-from backend.chat import stream_mas_agent, AGENT_ENDPOINT
+from backend.chat import stream_mas_agent, AGENT_ENDPOINT, select_route
 from backend import lakebase
 from backend.invoice_pdf import build_invoice_pdf
 from backend import escalate
 from backend import summary as summary_mod
-from backend.config import CATALOG, SCHEMA
+from backend.config import (
+    CATALOG, SCHEMA, DEMO_MODE, GENIE_SPACE_ID, WAREHOUSE_ID,
+    set_user_token, reset_user_token, auth_mode,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: verify DB connectivity with a timeout so cold-start warehouses
-    # don't block the app from becoming available. Falls back to demo mode.
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(db.query, "SELECT 1 as ok"),
-            timeout=120.0,
-        )
-        print(f"Database connection verified: {result}")
-    except asyncio.TimeoutError:
-        # Explicitly enable demo mode so metrics endpoints don't hang on the cold warehouse
-        db._demo_mode = True
-        print("WARNING: Database connection timed out at startup (warehouse cold start) — using demo mode")
-    except Exception as e:
-        db._demo_mode = True
-        print(f"WARNING: Database connection failed: {e}")
+    # Startup: probe the warehouse with the app service principal (no request yet).
+    # A failure is NOT a switch to demo data: endpoints keep retrying and return a
+    # typed 503 until the warehouse answers; the UI shows a banner meanwhile.
+    if DEMO_MODE:
+        print("DEMO_MODE=true — serving fixture metrics; warehouse queries disabled")
+    else:
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(db.query, "SELECT 1 as ok"), timeout=120.0)
+            print(f"Database connection verified: {result}")
+        except asyncio.TimeoutError:
+            print("WARNING: warehouse probe timed out at startup (cold start) — will retry per request")
+        except Exception as e:
+            print(f"WARNING: warehouse probe failed: {e} — will retry per request")
     # Initialize Lakebase schema (also with timeout)
     try:
         await asyncio.wait_for(
@@ -53,6 +54,47 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Finance Operations App", lifespan=lifespan)
 
+
+class OboTokenMiddleware:
+    """Pure-ASGI middleware: expose the forwarded user token to backend.config for
+    the lifetime of the request (including streamed responses), so warehouse reads
+    run on behalf of the user. Pure ASGI (not BaseHTTPMiddleware) keeps the
+    contextvar visible inside StreamingResponse generators."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        token = None
+        for k, v in scope.get("headers", []):
+            if k == b"x-forwarded-access-token":
+                token = v.decode()
+                break
+        ctx = set_user_token(token)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            reset_user_token(ctx)
+
+
+app.add_middleware(OboTokenMiddleware)
+
+
+@app.exception_handler(db.WarehouseUnavailable)
+async def _warehouse_unavailable(request: Request, exc: db.WarehouseUnavailable):
+    return JSONResponse(status_code=503, content={
+        "error": "demo_mode" if DEMO_MODE else "warehouse_unavailable",
+        "message": "Warehouse starting — data unavailable" if not DEMO_MODE else "Demo mode — no live data",
+        "detail": str(exc)[:300],
+    })
+
+
+@app.exception_handler(db.QueryError)
+async def _query_error(request: Request, exc: db.QueryError):
+    return JSONResponse(status_code=502, content={"error": "query_error", "detail": str(exc)[:500]})
+
 # ─── API Routes ──────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -62,17 +104,25 @@ async def health():
 
 @app.get("/api/debug/status")
 async def debug_status():
-    """Diagnostics: DB mode, Lakebase status, escalate config."""
+    """Diagnostics: data mode, auth mode, Lakebase, Genie, escalate config."""
     from backend import escalate as _esc
-    from backend.config import WAREHOUSE_ID, CATALOG, SCHEMA
+    from backend.chat import MAS_ENDPOINT
+    ds = db.data_status()
     return {
+        "demo_mode": DEMO_MODE,
+        "auth_mode": auth_mode(),
         "db": {
-            "demo_mode": db._demo_mode,
-            "warehouse_id": WAREHOUSE_ID,
+            **ds,
             "catalog": CATALOG,
             "schema": SCHEMA,
         },
         "lakebase": lakebase.get_status(),
+        "genie": {
+            "configured": bool(GENIE_SPACE_ID),
+            "space_id": GENIE_SPACE_ID,
+            "mas_endpoint": MAS_ENDPOINT or None,
+            "chat_route": select_route(),
+        },
         "escalate": {
             "alert_id": _esc._alert_id,
             "dest_id": _esc._dest_id,
@@ -80,6 +130,25 @@ async def debug_status():
             "sql_cached": bool(_esc._last_sql),
         },
     }
+
+
+@app.get("/api/data-status")
+async def data_status():
+    """Lightweight status for the UI banner: is the backend serving live rows?"""
+    ds = db.data_status()
+    if ds["live"] is not True and not DEMO_MODE:
+        # Probe so the banner clears as soon as the warehouse is back.
+        try:
+            await asyncio.to_thread(db.query, "SELECT 1 AS ok")
+        except Exception:
+            pass
+        ds = db.data_status()
+    banner = None
+    if DEMO_MODE:
+        banner = "Demo data — not connected to the lakehouse"
+    elif ds["live"] is not True:
+        banner = "Warehouse starting — data unavailable"
+    return {**ds, "auth_mode": auth_mode(), "banner": banner}
 
 
 # ── User Identity ──
@@ -121,6 +190,7 @@ async def verify_invoice(invoice_id: str):
             i.po_id, i.invoice_amount, i.invoice_total_inr,
             i.gstin_vendor, i.match_status, i.is_overdue, i.aging_days,
             i.data_source, i.pdf_file_path,
+            i.release_blocked, i.block_reason, i.ai_extracted_amount,
             p.total_amount AS po_total_amount,
             v.gstin AS vendor_master_gstin,
             v.country AS vendor_country,
@@ -138,6 +208,7 @@ async def verify_invoice(invoice_id: str):
         return JSONResponse({"error": f"invoice {invoice_id} not found"}, status_code=404)
 
     r = rows[0]
+    release_blocked = bool(r.get("release_blocked"))
     inv_amt   = float(r.get("invoice_amount") or 0)
     inv_total = float(r.get("invoice_total_inr") or 0)
     po_total  = float(r.get("po_total_amount") or 0)
@@ -149,7 +220,7 @@ async def verify_invoice(invoice_id: str):
 
     erp_vendor = (r.get("vendor_name") or "").strip().lower()
     ex_vendor  = (r.get("extracted_vendor_name") or "").strip().lower()
-    erp_gstin  = (r.get("gstin_vendor") or r.get("vendor_master_gstin") or "").strip().upper()
+    erp_gstin  = (r.get("vendor_master_gstin") or r.get("gstin_vendor") or "").strip().upper()
     ex_gstin   = (r.get("extracted_gstin") or "").strip().upper()
     erp_po     = (r.get("po_id") or "").strip()
     ex_po      = (r.get("extracted_po_reference") or "").strip()
@@ -169,18 +240,20 @@ async def verify_invoice(invoice_id: str):
         checks.append({"id":1, "name":"Invoice ↔ PO total", "status":"FAIL",
                        "detail":"no PO linked — cannot 3-way match"})
 
-    # 2. ERP subtotal vs AI-extracted subtotal
-    if ex_sub:
-        v = _ratio(inv_amt, ex_sub)
-        if v <= 0.02:
-            checks.append({"id":2, "name":"ERP subtotal ↔ PDF subtotal", "status":"PASS",
-                           "detail":f"₹{inv_amt:,.0f} vs ₹{ex_sub:,.0f} (within 2%)"})
-        else:
-            checks.append({"id":2, "name":"ERP subtotal ↔ PDF subtotal", "status":"FAIL",
-                           "detail":f"₹{inv_amt:,.0f} vs ₹{ex_sub:,.0f} ({v*100:.1f}% variance)"})
+    # 2. AI release control: PDF total (tax-inclusive) vs ERP invoice total, 1% tolerance.
+    #    Mirrors the pipeline rule that sets gold_fact_invoices.release_blocked.
+    if release_blocked:
+        checks.append({"id":2, "name":"AI release control (PDF ↔ ERP total)", "status":"FAIL",
+                       "detail":f"RELEASE BLOCKED — {r.get('block_reason') or 'PDF disagrees with ERP'}"
+                                + (f"; PDF ₹{ex_total:,.0f} vs ERP ₹{inv_total:,.0f}" if ex_total else "")})
+    elif ex_total:
+        v = _ratio(ex_total, inv_total)
+        status = "PASS" if v <= 0.01 else "FAIL"
+        checks.append({"id":2, "name":"AI release control (PDF ↔ ERP total)", "status":status,
+                       "detail":f"PDF ₹{ex_total:,.0f} vs ERP ₹{inv_total:,.0f} ({v*100:.1f}% variance, tolerance 1%)"})
     else:
-        checks.append({"id":2, "name":"ERP subtotal ↔ PDF subtotal", "status":"WARN",
-                       "detail":"PDF subtotal not extracted"})
+        checks.append({"id":2, "name":"AI release control (PDF ↔ ERP total)", "status":"WARN",
+                       "detail":"no PDF on file / total not extracted"})
 
     # 3. ERP vendor vs PDF vendor (case + punctuation-insensitive)
     if not ex_vendor:
@@ -193,8 +266,13 @@ async def verify_invoice(invoice_id: str):
         checks.append({"id":3, "name":"ERP vendor ↔ PDF vendor", "status":"FAIL",
                        "detail":f"ERP='{r.get('vendor_name')}' vs PDF='{r.get('extracted_vendor_name')}'"})
 
-    # 4. GSTIN match
-    if not ex_gstin:
+    # 4. GSTIN match (UC column masks hide GSTINs from non-controllers → WARN, not FAIL)
+    def _masked(v: str) -> bool:
+        return "XXXX" in v or "*" in v
+    if _masked(ex_gstin) or _masked(erp_gstin):
+        checks.append({"id":4, "name":"GSTIN match", "status":"WARN",
+                       "detail":"GSTIN masked by Unity Catalog policy (finance_controllers only)"})
+    elif not ex_gstin:
         checks.append({"id":4, "name":"GSTIN match", "status":"WARN",
                        "detail":"PDF GSTIN not extracted"})
     elif not erp_gstin:
@@ -248,14 +326,26 @@ async def verify_invoice(invoice_id: str):
         checks.append({"id":7, "name":"Duplicate payment check", "status":"PASS",
                        "detail":"no duplicates in last 90 days"})
 
-    # 8. Sub-ledger ↔ GL tie-out (confirms this invoice contributes to GL acct 2000)
-    checks.append({"id":8, "name":"Sub-ledger ↔ GL tie-out", "status":"PASS",
-                   "detail":"AP sub-ledger reconciles to gold_fact_trial_balance.2000 (Δ = 0)"})
+    # 8. AP sub-ledger ↔ GL tie-out, read from gold_recon_subledger_vs_gl (not asserted)
+    recon = await asyncio.to_thread(db.get_subledger_gl_recon)
+    ap = next((x for x in recon["rows"] if x["account_code"] == "2000"), None)
+    if ap is None:
+        checks.append({"id":8, "name":"AP sub-ledger ↔ GL tie-out", "status":"WARN",
+                       "detail":"reconciliation row for account 2000 not found"})
+    elif ap["tied"]:
+        checks.append({"id":8, "name":"AP sub-ledger ↔ GL tie-out", "status":"PASS",
+                       "detail":f"tied: Δ ₹{ap['delta']:,.0f} fully explained by {ap['reconciling_items_count']} reconciling item(s)"})
+    else:
+        checks.append({"id":8, "name":"AP sub-ledger ↔ GL tie-out", "status":"WARN",
+                       "detail":f"unexplained Δ ₹{ap['unexplained_delta']:,.0f} on account 2000"})
 
     # Recommendation
     fail_count = sum(1 for c in checks if c["status"] == "FAIL")
     warn_count = sum(1 for c in checks if c["status"] == "WARN")
-    if fail_count > 0:
+    if release_blocked:
+        rec = {"label": "HOLD", "tone": "danger",
+               "reason": f"Payment release blocked by the AI control: {r.get('block_reason') or 'PDF disagrees with ERP'}"}
+    elif fail_count > 0:
         rec = {"label": "REJECT", "tone": "danger",
                "reason": f"{fail_count} hard failures: " + ", ".join([c["name"] for c in checks if c["status"] == "FAIL"])}
     elif warn_count > 0:
@@ -268,6 +358,10 @@ async def verify_invoice(invoice_id: str):
         "invoice_id": r.get("invoice_id"),
         "invoice_number": r.get("invoice_number"),
         "vendor_name": r.get("vendor_name"),
+        "release_blocked": release_blocked,
+        "block_reason": r.get("block_reason"),
+        "erp_total": inv_total,
+        "pdf_total": ex_total or None,
         "checks": checks,
         "recommendation": rec,
     }
@@ -275,14 +369,37 @@ async def verify_invoice(invoice_id: str):
 
 @app.get("/api/recon")
 async def get_recon():
-    """Sub-ledger ↔ GL trial balance reconciliation.
+    """Sub-ledger ↔ GL reconciliation at the GL cut-off.
 
-    Returns one row per reconciled account (AR=1100, AP=2000) with:
-      subledger_amount, gl_amount, delta, tied.
-    delta = subledger_amount - gl_amount. When the loop is closed delta = 0.
+    Returns {"rows": [...], "all_tied": bool}; one row per control account
+    (AR=1100, AP=2000) with subledger_amount, gl_amount, delta,
+    reconciling_items_amount/count, unexplained_delta, tied, cutoff_date and the
+    documented reconciling items. tied ⇔ |unexplained_delta| < ₹1.
     """
-    rows = await asyncio.to_thread(db.get_subledger_gl_recon)
-    return {"rows": rows}
+    return await asyncio.to_thread(db.get_subledger_gl_recon)
+
+
+@app.get("/api/ap/exception-queue")
+async def ap_exception_queue(limit: int = Query(200, ge=1, le=500)):
+    """AP exception queue served from Lakebase (synced from Gold); warehouse fallback is flagged."""
+    rows = await asyncio.to_thread(lakebase.get_ap_exception_queue, limit)
+    if rows is not None:
+        return {"source": "lakebase", "rows": rows}
+    rows = await asyncio.to_thread(db.get_ap_exception_queue_from_warehouse, limit)
+    return {"source": "warehouse", "rows": rows}
+
+
+@app.get("/api/ap/exception-queue/{invoice_id}")
+async def ap_exception_queue_item(invoice_id: str):
+    """Low-latency lookup of one queued invoice (Lakebase), with its latest approval action."""
+    rows = await asyncio.to_thread(lakebase.get_ap_exception_queue, 1, invoice_id)
+    source = "lakebase"
+    if rows is None:
+        rows = await asyncio.to_thread(db.get_ap_exception_queue_from_warehouse, 1, invoice_id)
+        source = "warehouse"
+    if not rows:
+        return JSONResponse({"error": f"{invoice_id} not in the exception queue"}, status_code=404)
+    return {"source": source, "row": rows[0]}
 
 
 @app.get("/api/summary/{tab}")
@@ -290,17 +407,13 @@ async def get_summary(tab: str):
     """LLM-generated glance summary for the given tab (P2P / O2C / R2R)."""
     if tab.upper() not in {"P2P", "O2C", "R2R"}:
         return JSONResponse({"error": "tab must be P2P, O2C, or R2R"}, status_code=400)
-    if db._demo_mode:
-        return {
-            "tab": tab.upper(),
-            "bullets": [
-                "- Demo mode active — live LLM summary unavailable until warehouse warms up",
-                "- Run the DLT pipeline + Gold notebooks, then refresh",
-            ],
-            "as_of": None,
-        }
+    if DEMO_MODE:
+        return {"tab": tab.upper(), "bullets": ["- Demo mode — live summary disabled"],
+                "as_of": None, "demo": True}
     try:
         return await summary_mod.generate_summary(tab)
+    except (db.WarehouseUnavailable, db.QueryError):
+        raise
     except Exception as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=500)
 
@@ -311,6 +424,8 @@ async def metrics_p2p():
         metrics = await asyncio.to_thread(db.get_p2p_metrics)
         payment_run = await asyncio.to_thread(db.get_payment_run_data)
         return {"metrics": metrics, "payment_run": payment_run}
+    except (db.WarehouseUnavailable, db.QueryError):
+        raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -320,6 +435,8 @@ async def metrics_o2c():
     try:
         metrics = await asyncio.to_thread(db.get_o2c_metrics)
         return {"metrics": metrics}
+    except (db.WarehouseUnavailable, db.QueryError):
+        raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -329,6 +446,8 @@ async def metrics_r2r():
     try:
         metrics = await asyncio.to_thread(db.get_r2r_metrics)
         return {"metrics": metrics}
+    except (db.WarehouseUnavailable, db.QueryError):
+        raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -410,6 +529,7 @@ async def chat(req: ChatRequest, request: Request):
         full_answer = ""
         response_id = None
         tool_name = None
+        done_ev: dict = {}
 
         try:
             async for event in stream_mas_agent(messages, user_token=user_token, previous_response_id=prev_response_id, active_tab=req.active_tab):
@@ -419,6 +539,7 @@ async def chat(req: ChatRequest, request: Request):
                 elif event["type"] == "done":
                     response_id = event.get("response_id")
                     tool_name = event.get("tool")
+                    done_ev = event
                 elif event["type"] == "error":
                     yield f"data: {json.dumps({'type': 'error', 'message': event['message']})}\n\n"
                     return
@@ -431,15 +552,21 @@ async def chat(req: ChatRequest, request: Request):
             yield f"data: {json.dumps({'type': 'chunk', 'text': full_answer})}\n\n"
 
         # Persist this turn to Lakebase
+        route = done_ev.get("route") or select_route()
         routing_info = {
             "domain": "Finance Agent",
-            "explanation": f"Mosaic AI Agent → {tool_name}" if tool_name else "Routed via Mosaic AI Agent",
+            "route": route,
+            "explanation": {"genie": "Genie Agent (Conversation API)",
+                            "mas": "Agent Bricks supervisor",
+                            "sql_agent": "Claude + guarded SQL (fallback)"}.get(route, route),
             "tool": tool_name,
+            "auth": done_ev.get("auth"),
+            "row_count": done_ev.get("row_count"),
         }
         await asyncio.to_thread(
             lakebase.log_chat,
             session_id, user_email, req.active_tab, req.question,
-            AGENT_ENDPOINT, full_answer, "", routing_info, response_id,
+            AGENT_ENDPOINT, full_answer, done_ev.get("sql") or "", routing_info, response_id,
         )
 
         done_payload = {
@@ -448,6 +575,7 @@ async def chat(req: ChatRequest, request: Request):
             "previous_response_id": response_id or "",
             "routing": routing_info,
             "agent": AGENT_ENDPOINT,
+            "sql": done_ev.get("sql"),
         }
         yield f"data: {json.dumps(done_payload)}\n\n"
 
@@ -497,8 +625,10 @@ class ApprovalRequest(BaseModel):
 async def approve_invoice(req: ApprovalRequest, request: Request):
     user = request.headers.get("x-forwarded-email", "unknown")
     try:
+        # Write path uses the app service principal (Lakebase), independent of the user's token.
         await asyncio.to_thread(lakebase.log_approval, req.invoice_id, req.action, req.reason, user)
-        return {"status": "logged", "action": req.action, "invoice_id": req.invoice_id}
+        return {"status": "logged", "action": req.action, "invoice_id": req.invoice_id,
+                "persisted_to": "lakebase" if lakebase.is_connected() else "memory"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -602,40 +732,23 @@ def _build_invoice_response(row: dict) -> dict:
         # Data provenance fields — used by the UI to show source badges and conditionally show PDF
         "data_source":       data_source,
         "has_source_pdf":    bool(pdf_path),
+        # AI release control (gold_fact_invoices.release_blocked)
+        "release_blocked":   bool(row.get("release_blocked")),
+        "block_reason":      row.get("block_reason"),
+        "legal_entity":      row.get("legal_entity"),
     }
 
 
 def _demo_invoice_fallback(invoice_id: str) -> dict | None:
-    """Return a demo invoice when the warehouse is unavailable."""
-    demo_pool = db._get_demo_invoices(200)
-    for inv in demo_pool:
-        if inv.get("invoice_id") == invoice_id or inv.get("invoice_number") == invoice_id:
-            matched = inv.get("match_status") in ("THREE_WAY_MATCHED", "TWO_WAY_MATCHED")
-            return {
-                **inv,
-                "quarantine_reason": None if matched else inv.get("match_status"),
-                "raw_text": "",
-                "file_path": inv.get("pdf_file_path") or "",
-            }
-    # Construct a plausible demo invoice for any unknown ID
+    """Fixture invoice — ONLY when DEMO_MODE=true. Otherwise unknown IDs are a 404."""
+    if not DEMO_MODE:
+        return None
     return {
-        "invoice_id": invoice_id,
-        "invoice_number": invoice_id if invoice_id.startswith("VINV-") else f"VINV-2025-{abs(hash(invoice_id)) % 99999:05d}",
-        "quarantine_reason": "AMOUNT_MISMATCH",
-        "vendor_id": "V001",
-        "vendor_name": "Demo Vendor Co.",
-        "po_id": "PO-2025-DEMO",
-        "invoice_date": "2025-03-01",
-        "due_date": "2025-04-01",
-        "invoice_amount": 450000.0,
-        "po_amount": 420000.0,
-        "status": "PENDING",
-        "gstin": "29AABCT1234H1Z2",
-        "payment_terms": "Net 30",
-        "raw_text": "",
-        "file_path": "",
-        "data_source": "ERP_ONLY",
-        "has_source_pdf": False,
+        "invoice_id": invoice_id, "invoice_number": invoice_id, "quarantine_reason": None,
+        "vendor_id": "DEMO", "vendor_name": "Demo Vendor (fixture)", "po_id": "",
+        "invoice_date": "", "due_date": "", "invoice_amount": 0.0, "po_amount": 0.0,
+        "status": "DEMO", "gstin": "", "payment_terms": "", "raw_text": "", "file_path": "",
+        "data_source": "DEMO", "has_source_pdf": False,
     }
 
 
@@ -654,7 +767,7 @@ async def get_invoice(invoice_id: str):
 
     try:
         # Skip warehouse queries immediately if in demo mode (warehouse unavailable)
-        if db._demo_mode:
+        if DEMO_MODE:
             return _build_invoice_response(_demo_invoice_fallback(invoice_id))
 
 
@@ -678,6 +791,9 @@ async def get_invoice(invoice_id: str):
                 NULL                AS payment_terms,
                 i.pdf_file_path,
                 i.data_source,
+                i.release_blocked,
+                i.block_reason,
+                i.legal_entity,
                 x.extracted_vendor_name,
                 x.extracted_total_amount,
                 x.extracted_gstin,
@@ -738,10 +854,10 @@ async def get_invoice(invoice_id: str):
 
         if rows:
             return _build_invoice_response(rows[0])
+        return JSONResponse(status_code=404, content={"error": f"invoice {invoice_id} not found"})
 
-        # 4️⃣ Demo fallback when warehouse is unreachable
-        return _build_invoice_response(_demo_invoice_fallback(invoice_id))
-
+    except (db.WarehouseUnavailable, db.QueryError):
+        raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -811,7 +927,7 @@ async def get_invoice_pdf(invoice_id: str, request: Request, download: bool = Qu
 
     try:
         # Skip warehouse queries immediately if in demo mode
-        if db._demo_mode:
+        if DEMO_MODE:
             erp = _build_invoice_response(_demo_invoice_fallback(invoice_id))
             pdf_bytes = await asyncio.to_thread(build_invoice_pdf, erp, "")
             return Response(content=pdf_bytes, media_type="application/pdf",
@@ -870,7 +986,9 @@ async def get_invoice_pdf(invoice_id: str, request: Request, download: bool = Qu
                 LIMIT 1
             """, {"invoice_id": invoice_id})
 
-        erp = _build_invoice_response(rows[0] if rows else _demo_invoice_fallback(invoice_id))
+        if not rows:
+            return JSONResponse(status_code=404, content={"error": f"invoice {invoice_id} not found"})
+        erp = _build_invoice_response(rows[0])
         file_path = erp.get("file_path", "")
 
         # Try to serve the actual source PDF from UC Volume
@@ -892,6 +1010,8 @@ async def get_invoice_pdf(invoice_id: str, request: Request, download: bool = Qu
             headers={"Content-Disposition": _disposition(f"invoice-{invoice_id}.pdf")},
         )
 
+    except (db.WarehouseUnavailable, db.QueryError):
+        raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

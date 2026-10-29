@@ -12,7 +12,7 @@ import GreetingBanner from "./GreetingBanner";
 import ExceptionDrawer from "./ExceptionDrawer";
 import SummaryCard from "./SummaryCard";
 import TopSummaryCard from "./TopSummaryCard";
-import { inr, formatNum, agingColor } from "../utils";
+import { inr, formatNum, agingColor, dash } from "../utils";
 
 type O2CMetrics = {
   metrics: {
@@ -104,16 +104,14 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
       <TopSummaryCard tab="O2C" />
 
       {/* KPI Strip */}
-      {m && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <MetricCard label="AR Outstanding" value={inr(m.total_outstanding)} icon={<DollarSign className="w-4 h-4" />} />
-          <MetricCard label="DSO" value={`${m.avg_dso} days`} color={m.avg_dso > 42 ? "text-db-amber" : "text-db-green"} sub="Target: 42 days" icon={<TrendingUp className="w-4 h-4" />} />
-          <MetricCard label="CEI" value={`${m.cei}%`} color="text-db-blue" icon={<CheckCircle2 className="w-4 h-4" />} />
-          <MetricCard label="Overdue" value={formatNum(m.overdue_count)} color="text-db-red" icon={<Clock className="w-4 h-4" />} />
-          <MetricCard label="Collected" value={formatNum(m.collected)} color="text-db-green" icon={<DollarSign className="w-4 h-4" />} />
-          <MetricCard label="At Risk" value={formatNum(m.customers_at_risk.length)} color="text-db-amber" icon={<ShieldAlert className="w-4 h-4" />} />
-        </div>
-      )}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <MetricCard label="AR Outstanding" value={dash(m?.total_outstanding, inr)} icon={<DollarSign className="w-4 h-4" />} />
+        <MetricCard label="DSO" value={dash(m?.avg_dso, (v) => `${v} days`)} color={!m ? "text-text-muted" : m.avg_dso > 42 ? "text-db-amber" : "text-db-green"} sub="Target: 42 days" icon={<TrendingUp className="w-4 h-4" />} />
+        <MetricCard label="CEI" value={dash(m?.cei, (v) => `${v}%`)} color="text-db-blue" icon={<CheckCircle2 className="w-4 h-4" />} />
+        <MetricCard label="Overdue" value={dash(m?.overdue_count, formatNum)} color="text-db-red" icon={<Clock className="w-4 h-4" />} />
+        <MetricCard label="Collected" value={dash(m?.collected, formatNum)} color="text-db-green" icon={<DollarSign className="w-4 h-4" />} />
+        <MetricCard label="At Risk" value={dash(m?.customers_at_risk?.length, formatNum)} color="text-db-amber" icon={<ShieldAlert className="w-4 h-4" />} />
+      </div>
 
       {/* Controls */}
       <div className="flex items-center gap-3">
@@ -262,7 +260,7 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
         {/* Right side */}
         <div className="flex flex-col gap-4">
           {/* Aging Chart */}
-          {m && m.aging_buckets.length > 0 && (
+          {m && m.aging_buckets?.length > 0 && (
             <div className="glass-card p-4">
               <h3 className="text-sm font-semibold text-text-primary mb-3">AR Aging</h3>
               <ResponsiveContainer width="100%" height={160}>
@@ -290,7 +288,7 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
           )}
 
           {/* Credit Risk Customers */}
-          {m && m.customers_at_risk.length > 0 && (
+          {m && m.customers_at_risk?.length > 0 && (
             <div className="glass-card flex flex-col overflow-hidden" style={{ maxHeight: "280px" }}>
               <div className="px-4 py-3 border-b border-border-subtle flex items-center gap-2">
                 <ShieldAlert className="w-4 h-4 text-db-amber" />

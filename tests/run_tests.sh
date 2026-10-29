@@ -25,6 +25,7 @@ run_backend() {
   DATABRICKS_WAREHOUSE_ID="${DATABRICKS_WAREHOUSE_ID:-}" \
   DATABRICKS_CATALOG="${DATABRICKS_CATALOG:-fna_control_tower_catalog}" \
   DATABRICKS_SCHEMA="${DATABRICKS_SCHEMA:-finance_and_accounting}" \
+  QUERY_RETRY_BACKOFF=0 \
   "${PYTEST:-pytest}" "$TESTS_DIR/test_backend.py" -v \
     --tb=short \
     2>&1
@@ -48,7 +49,7 @@ run_frontend() {
     DEV_PID=$!
     sleep 4  # wait for vite to start
     trap "kill $DEV_PID 2>/dev/null" EXIT
-    export APP_URL="http://localhost:5173"
+    export LOCAL_URL="http://localhost:5173"
   fi
   npx playwright test \
     --config="$TESTS_DIR/playwright.config.ts" \

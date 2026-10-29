@@ -8,6 +8,7 @@ import APTab from "./components/APTab";
 import ARTab from "./components/ARTab";
 import GLTab from "./components/GLTab";
 import AIChatPanel from "./components/AIChatPanel";
+import DataStatusBanner from "./components/DataStatusBanner";
 
 const TABS = [
   { id: "AP Operations", icon: FileText, label: "AP Operations", sub: "Procure to Pay" },
@@ -126,6 +127,9 @@ export default function App() {
           {notification}
         </motion.div>
       )}
+
+      {/* Live-data banner: never show invented numbers silently */}
+      <DataStatusBanner />
 
       {/* Content */}
       <div className="flex flex-1 min-h-0 overflow-hidden">

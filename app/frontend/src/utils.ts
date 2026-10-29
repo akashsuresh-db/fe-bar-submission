@@ -83,3 +83,8 @@ export function agingColor(bucket: string): string {
   if (bucket.includes("90+")) return "#DC2626";
   return "#6B7280";
 }
+
+/** KPI display helper: "—" when the backend is not serving live rows. */
+export function dash<T>(value: T | null | undefined, fmt: (v: T) => string = (v) => String(v)): string {
+  return value === null || value === undefined ? "—" : fmt(value);
+}

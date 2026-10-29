@@ -1,1103 +1,467 @@
 """
 Finance & Accounting Control Tower — Backend Test Suite
 ========================================================
-Tests every API endpoint, SSE stream, and button action handler.
+Runs locally with mocks: no workspace, warehouse, Genie space or Lakebase needed.
 
 Run:
-    cd app && uv run pytest ../tests/test_backend.py -v
+    ./tests/run_tests.sh backend
+    # or: cd app && PYTHONPATH=. pytest ../tests/test_backend.py -v
 
-Set env vars before running locally:
-    export DATABRICKS_CONFIG_PROFILE=e2-demo-west
-    export DATABRICKS_WAREHOUSE_ID=<your-warehouse-id>
-    export DATABRICKS_CATALOG=fna_control_tower_catalog
-    export DATABRICKS_SCHEMA=finance_and_accounting
+Covers the FE BAR fixes:
+  F1  recon "Tied" only when the unexplained delta is zero; items surfaced
+  F2  touchless excludes release-blocked invoices; verify-invoice HOLDs them
+  F5  chat routes to Genie when no MAS endpoint is set; Genie API flow; fallback
+  F6  no silent mock data: typed 503 + banner, recovery, DEMO_MODE only when set,
+      data-derived auto_matched, posting-date replay order
+  F8  on-behalf-of-user token used for warehouse reads
+  F9  sqlglot SQL guard: DDL, DML, multi-statement, off-list tables, LIMIT
 """
-
-import json
 import asyncio
-import sys
+import json
 import os
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+import sys
+from unittest.mock import MagicMock, patch
 
-# ─── Path setup — MUST be first ───────────────────────────────
-# Inject venv site-packages BEFORE any databricks imports so that
-# databricks-sql-connector wins over the bare databricks SDK in conda.
+import pytest
+
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app"))
-VENV_SITE = os.path.join(APP_DIR, ".venv", "lib", "python3.10", "site-packages")
-if os.path.exists(VENV_SITE) and VENV_SITE not in sys.path:
-    sys.path.insert(0, VENV_SITE)
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
-# Force-reload databricks so venv's version (with sql) takes precedence
-import importlib
-if "databricks" in sys.modules:
-    del sys.modules["databricks"]
-for k in list(sys.modules.keys()):
-    if k.startswith("databricks."):
-        del sys.modules[k]
+os.environ.setdefault("DATABRICKS_HOST", "https://example.cloud.databricks.com")
+os.environ.setdefault("DATABRICKS_CATALOG", "cat")
+os.environ.setdefault("DATABRICKS_SCHEMA", "sch")
+os.environ.setdefault("DATABRICKS_TOKEN", "sp-token")
+os.environ.setdefault("QUERY_RETRY_BACKOFF", "0")
 
-import httpx
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: E402
 
-# Patch DB and lakebase before importing app to avoid connection on import
 with patch("backend.db.query", return_value=[{"ok": 1}]), \
      patch("backend.lakebase.init_schema", return_value=None):
-    from backend.main import app
+    from backend import main, db, chat, streams, lakebase, config  # noqa: E402
+    from backend.sql_guard import guard_sql, SqlGuardError  # noqa: E402
 
-client = TestClient(app, raise_server_exceptions=False)
+CAT, SCH = config.CATALOG, config.SCHEMA
 
 
-# ═══════════════════════════════════════════════════════════════
-# Fixtures
-# ═══════════════════════════════════════════════════════════════
+@pytest.fixture()
+def client():
+    # Patches cover app startup only (warehouse probe + Lakebase DDL), not the test body.
+    p1 = patch("backend.lakebase.init_schema", return_value=None)
+    p2 = patch("backend.db.query", return_value=[{"ok": 1}])
+    p1.start(); p2.start()
+    c = TestClient(main.app, raise_server_exceptions=False)
+    c.__enter__()
+    p1.stop(); p2.stop()
+    try:
+        yield c
+    finally:
+        c.__exit__(None, None, None)
 
-INVOICE_ID = "INV000001"
-ERP_INVOICE_NUMBER = "VINV-2025-00001"
 
-MOCK_P2P_METRICS = {
-    "total_invoices": 500,
-    "matched": 400,
-    "two_way": 50,
-    "amount_mismatch": 30,
-    "no_po": 20,
-    "exceptions": 50,
-    "overdue_count": 75,
-    "total_amount": 50000000.0,
-    "overdue_amount": 8000000.0,
-    "avg_aging_days": 28.5,
-    "touchless_rate": 80.0,
-}
+@pytest.fixture(autouse=True)
+def _reset_status():
+    db._status.update(live=None, last_error=None, last_success_at=None, last_failure_at=None)
+    yield
 
-MOCK_PAYMENT_RUN = {
-    "total_payments": 300,
-    "total_paid": 40000000.0,
-    "avg_dpo": 38.2,
-    "early_payments": 120,
-    "on_time_payments": 150,
-    "late_payments": 30,
-}
 
-MOCK_O2C_METRICS = {
-    "total_outstanding": 25000000.0,
-    "avg_dso": 38.5,
-    "total_invoices": 450,
-    "collected": 200,
-    "total_collected": 18000000.0,
-    "overdue_count": 90,
-    "cei": 82.3,
-    "aging_buckets": [
-        {"bucket": "0-30", "count": 200, "amount": 10000000.0},
-        {"bucket": "31-60", "count": 150, "amount": 8000000.0},
-        {"bucket": "61-90", "count": 70, "amount": 5000000.0},
-        {"bucket": "90+", "count": 30, "amount": 2000000.0},
-    ],
-    "customers_at_risk": [
-        {"name": "Reliance Industries", "credit_limit": 5000000.0,
-         "outstanding": 5500000.0, "utilization": 110.0, "overdue": 200000.0, "dso": 55.0},
-    ],
-}
-
-MOCK_R2R_METRICS = {
-    "total_jes": 250,
-    "total_lines": 1200,
-    "total_debits": 45000000.0,
-    "total_credits": 45000000.0,
-    "posted": 240,
-    "pending": 10,
-    "tb_total_debit": 45000000.0,
-    "tb_total_credit": 45000000.0,
-    "tb_imbalance": 0.0,
-    "is_balanced": True,
-    "trial_balance": [
-        {"account_code": "1000", "account_name": "Cash", "account_type": "ASSET",
-         "debit": 5000000.0, "credit": 0.0, "balance": 5000000.0, "balance_type": "DR", "transactions": 45},
-        {"account_code": "2000", "account_name": "Accounts Payable", "account_type": "LIABILITY",
-         "debit": 0.0, "credit": 5000000.0, "balance": 5000000.0, "balance_type": "CR", "transactions": 30},
-    ],
-}
-
-MOCK_INVOICE_ROW = {
-    "invoice_id": INVOICE_ID,
-    "invoice_number": ERP_INVOICE_NUMBER,
-    "exception_type": "AMOUNT_MISMATCH",
-    "vendor_id": "VEN001",
-    "vendor_name": "Tech Solutions Ltd",
-    "po_id": "PO-2025-001",
-    "invoice_date": "2025-03-01",
-    "due_date": "2025-03-31",
-    "invoice_amount": 250000.0,
-    "total_amount": 240000.0,
-    "status": "PENDING",
-    "gstin_vendor": "29AABCT1332L1ZV",
-    "payment_terms": "Net 30",
-    "raw_text": "INVOICE\nVendor: Tech Solutions Ltd\nAmount: 250,000",
-    "file_path": "/uploads/inv000001.pdf",
-}
+def run(coro_gen):
+    """Collect an async generator into a list."""
+    async def _collect():
+        return [x async for x in coro_gen]
+    return asyncio.run(_collect())
 
 
 # ═══════════════════════════════════════════════════════════════
-# 1. Health & Identity
+# Health
 # ═══════════════════════════════════════════════════════════════
 
-class TestHealthAndIdentity:
+def test_health(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200 and r.json()["status"] == "healthy"
 
-    def test_health_returns_200(self):
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
 
-    def test_health_response_structure(self):
-        resp = client.get("/api/health")
-        body = resp.json()
-        assert body["status"] == "healthy"
-        assert body["app"] == "finance-operations"
-
-    def test_me_no_headers(self):
-        """Without forwarded headers, should return fallback values."""
-        resp = client.get("/api/me")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert "name" in body
-        assert "email" in body
-        assert "username" in body
-
-    def test_me_with_email_header(self):
-        resp = client.get("/api/me", headers={"x-forwarded-email": "john.doe@databricks.com"})
-        body = resp.json()
-        assert body["email"] == "john.doe@databricks.com"
-        assert body["name"] == "John"  # first name extracted
-
-    def test_me_with_preferred_username(self):
-        resp = client.get("/api/me", headers={
-            "x-forwarded-email": "demo.user@example.com",
-            "x-forwarded-preferred-username": "demo.user",
-        })
-        body = resp.json()
-        assert body["name"] == "Demo User"
-
-    def test_me_single_name(self):
-        resp = client.get("/api/me", headers={"x-forwarded-email": "alice@databricks.com"})
-        body = resp.json()
-        assert body["name"] == "Alice"
+def test_me_reads_forwarded_identity(client):
+    r = client.get("/api/me", headers={"x-forwarded-email": "jane.doe@example.com"})
+    assert r.json()["name"] == "Jane"
 
 
 # ═══════════════════════════════════════════════════════════════
-# 2. P2P Metrics Endpoint
+# F9 — SQL guard
 # ═══════════════════════════════════════════════════════════════
 
-class TestP2PMetrics:
-
-    @patch("backend.db.get_p2p_metrics", return_value=MOCK_P2P_METRICS)
-    @patch("backend.db.get_payment_run_data", return_value=MOCK_PAYMENT_RUN)
-    def test_p2p_metrics_200(self, mock_pr, mock_m):
-        resp = client.get("/api/metrics/p2p")
-        assert resp.status_code == 200
-
-    @patch("backend.db.get_p2p_metrics", return_value=MOCK_P2P_METRICS)
-    @patch("backend.db.get_payment_run_data", return_value=MOCK_PAYMENT_RUN)
-    def test_p2p_metrics_structure(self, mock_pr, mock_m):
-        resp = client.get("/api/metrics/p2p")
-        body = resp.json()
-        assert "metrics" in body
-        assert "payment_run" in body
-
-    @patch("backend.db.get_p2p_metrics", return_value=MOCK_P2P_METRICS)
-    @patch("backend.db.get_payment_run_data", return_value=MOCK_PAYMENT_RUN)
-    def test_p2p_metrics_all_fields(self, mock_pr, mock_m):
-        resp = client.get("/api/metrics/p2p")
-        m = resp.json()["metrics"]
-        required = ["total_invoices", "matched", "two_way", "amount_mismatch",
-                    "no_po", "exceptions", "overdue_count", "total_amount",
-                    "overdue_amount", "avg_aging_days", "touchless_rate"]
-        for field in required:
-            assert field in m, f"Missing field: {field}"
-
-    @patch("backend.db.get_p2p_metrics", return_value=MOCK_P2P_METRICS)
-    @patch("backend.db.get_payment_run_data", return_value=MOCK_PAYMENT_RUN)
-    def test_p2p_payment_run_fields(self, mock_pr, mock_m):
-        resp = client.get("/api/metrics/p2p")
-        pr = resp.json()["payment_run"]
-        required = ["total_payments", "total_paid", "avg_dpo",
-                    "early_payments", "on_time_payments", "late_payments"]
-        for field in required:
-            assert field in pr, f"Missing payment_run field: {field}"
-
-    @patch("backend.db.get_p2p_metrics", side_effect=Exception("DB connection failed"))
-    @patch("backend.db.get_payment_run_data", return_value={})
-    def test_p2p_metrics_db_error_returns_500(self, mock_pr, mock_m):
-        resp = client.get("/api/metrics/p2p")
-        assert resp.status_code == 500
-        assert "error" in resp.json()
-
-    @patch("backend.db.get_p2p_metrics", return_value=MOCK_P2P_METRICS)
-    @patch("backend.db.get_payment_run_data", return_value=MOCK_PAYMENT_RUN)
-    def test_p2p_touchless_rate_is_percentage(self, mock_pr, mock_m):
-        resp = client.get("/api/metrics/p2p")
-        rate = resp.json()["metrics"]["touchless_rate"]
-        assert 0 <= rate <= 100
-
-    @patch("backend.db.get_p2p_metrics", return_value=MOCK_P2P_METRICS)
-    @patch("backend.db.get_payment_run_data", return_value=MOCK_PAYMENT_RUN)
-    def test_p2p_exceptions_equals_mismatch_plus_no_po(self, mock_pr, mock_m):
-        resp = client.get("/api/metrics/p2p")
-        m = resp.json()["metrics"]
-        assert m["exceptions"] == m["amount_mismatch"] + m["no_po"]
-
-
-# ═══════════════════════════════════════════════════════════════
-# 3. O2C Metrics Endpoint
-# ═══════════════════════════════════════════════════════════════
-
-class TestO2CMetrics:
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_metrics_200(self, mock_m):
-        resp = client.get("/api/metrics/o2c")
-        assert resp.status_code == 200
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_metrics_structure(self, mock_m):
-        body = client.get("/api/metrics/o2c").json()
-        assert "metrics" in body
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_all_required_fields(self, mock_m):
-        m = client.get("/api/metrics/o2c").json()["metrics"]
-        required = ["total_outstanding", "avg_dso", "total_invoices", "collected",
-                    "total_collected", "overdue_count", "cei", "aging_buckets",
-                    "customers_at_risk"]
-        for field in required:
-            assert field in m, f"Missing: {field}"
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_aging_buckets_is_list(self, mock_m):
-        m = client.get("/api/metrics/o2c").json()["metrics"]
-        assert isinstance(m["aging_buckets"], list)
-        assert len(m["aging_buckets"]) > 0
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_aging_bucket_fields(self, mock_m):
-        bucket = client.get("/api/metrics/o2c").json()["metrics"]["aging_buckets"][0]
-        assert "bucket" in bucket
-        assert "count" in bucket
-        assert "amount" in bucket
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_customers_at_risk_structure(self, mock_m):
-        c = client.get("/api/metrics/o2c").json()["metrics"]["customers_at_risk"][0]
-        for field in ["name", "credit_limit", "outstanding", "utilization", "overdue", "dso"]:
-            assert field in c, f"Missing customer field: {field}"
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_dso_is_numeric(self, mock_m):
-        m = client.get("/api/metrics/o2c").json()["metrics"]
-        assert isinstance(m["avg_dso"], (int, float))
-
-    @patch("backend.db.get_o2c_metrics", side_effect=Exception("Warehouse offline"))
-    def test_o2c_db_error_500(self, mock_m):
-        resp = client.get("/api/metrics/o2c")
-        assert resp.status_code == 500
-
-    @patch("backend.db.get_o2c_metrics", return_value=MOCK_O2C_METRICS)
-    def test_o2c_cei_range(self, mock_m):
-        cei = client.get("/api/metrics/o2c").json()["metrics"]["cei"]
-        assert 0 <= cei <= 100
-
-
-# ═══════════════════════════════════════════════════════════════
-# 4. R2R Metrics Endpoint
-# ═══════════════════════════════════════════════════════════════
-
-class TestR2RMetrics:
-
-    @patch("backend.db.get_r2r_metrics", return_value=MOCK_R2R_METRICS)
-    def test_r2r_metrics_200(self, mock_m):
-        resp = client.get("/api/metrics/r2r")
-        assert resp.status_code == 200
-
-    @patch("backend.db.get_r2r_metrics", return_value=MOCK_R2R_METRICS)
-    def test_r2r_metrics_structure(self, mock_m):
-        body = client.get("/api/metrics/r2r").json()
-        assert "metrics" in body
-
-    @patch("backend.db.get_r2r_metrics", return_value=MOCK_R2R_METRICS)
-    def test_r2r_all_required_fields(self, mock_m):
-        m = client.get("/api/metrics/r2r").json()["metrics"]
-        required = ["total_jes", "total_lines", "total_debits", "total_credits",
-                    "posted", "pending", "tb_total_debit", "tb_total_credit",
-                    "tb_imbalance", "is_balanced", "trial_balance"]
-        for field in required:
-            assert field in m, f"Missing: {field}"
-
-    @patch("backend.db.get_r2r_metrics", return_value=MOCK_R2R_METRICS)
-    def test_r2r_trial_balance_is_list(self, mock_m):
-        tb = client.get("/api/metrics/r2r").json()["metrics"]["trial_balance"]
-        assert isinstance(tb, list)
-        assert len(tb) > 0
-
-    @patch("backend.db.get_r2r_metrics", return_value=MOCK_R2R_METRICS)
-    def test_r2r_trial_balance_row_fields(self, mock_m):
-        row = client.get("/api/metrics/r2r").json()["metrics"]["trial_balance"][0]
-        for field in ["account_code", "account_name", "account_type",
-                      "debit", "credit", "balance", "balance_type", "transactions"]:
-            assert field in row, f"Missing TB field: {field}"
-
-    @patch("backend.db.get_r2r_metrics", return_value=MOCK_R2R_METRICS)
-    def test_r2r_balanced_when_debits_equal_credits(self, mock_m):
-        m = client.get("/api/metrics/r2r").json()["metrics"]
-        assert m["is_balanced"] == (abs(m["tb_total_debit"] - m["tb_total_credit"]) < 1.0)
-
-    @patch("backend.db.get_r2r_metrics", side_effect=Exception("Query timeout"))
-    def test_r2r_db_error_500(self, mock_m):
-        resp = client.get("/api/metrics/r2r")
-        assert resp.status_code == 500
-
-
-# ═══════════════════════════════════════════════════════════════
-# 5. SSE Streams — Start/Stop Button Handlers
-# ═══════════════════════════════════════════════════════════════
-
-class TestSSEStreams:
-    """Test SSE endpoints that power the Start Processing / Start Collection Run /
-    Start JE Validation buttons."""
-
-    @patch("backend.db.get_invoices", return_value=[])
-    def test_p2p_stream_200(self, mock_inv):
-        """GET /stream/p2p should return 200 with text/event-stream."""
-        resp = client.get("/stream/p2p")
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers.get("content-type", "")
-
-    @patch("backend.db.get_invoices", return_value=[])
-    def test_p2p_stream_contains_greeting(self, mock_inv):
-        resp = client.get("/stream/p2p")
-        body = resp.text
-        assert "greeting" in body
-
-    @patch("backend.db.get_invoices", return_value=[])
-    def test_p2p_stream_contains_summary(self, mock_inv):
-        resp = client.get("/stream/p2p")
-        assert "summary" in resp.text
-
-    @patch("backend.db.get_invoices", return_value=[{
-        "invoice_id": "INV001", "invoice_number": "VINV-2025-001",
-        "vendor_name": "Test Corp", "vendor_category": "IT",
-        "invoice_date": "2025-03-01", "due_date": "2025-03-31",
-        "invoice_amount": 100000, "tax_amount": 18000, "invoice_total_inr": 118000,
-        "match_status": "THREE_WAY_MATCHED", "has_po_ref": True,
-        "is_overdue": False, "aging_days": 15, "aging_bucket": "0-30",
-        "invoice_status": "PENDING", "po_id": "PO-001", "gstin_vendor": "29AABCT1332L1ZV",
-    }])
-    def test_p2p_stream_emits_invoice_event(self, mock_inv):
-        resp = client.get("/stream/p2p")
-        assert "invoice" in resp.text
-
-    @patch("backend.db.get_invoices", return_value=[{
-        "invoice_id": "INV002", "invoice_number": "VINV-2025-002",
-        "vendor_name": "Bad Corp", "vendor_category": "Services",
-        "invoice_date": "2025-01-01", "due_date": "2025-01-31",
-        "invoice_amount": 500000, "tax_amount": 90000, "invoice_total_inr": 590000,
-        "match_status": "AMOUNT_MISMATCH", "has_po_ref": True,
-        "is_overdue": True, "aging_days": 65, "aging_bucket": "61-90",
-        "invoice_status": "EXCEPTION", "po_id": "PO-002", "gstin_vendor": None,
-    }])
-    def test_p2p_stream_emits_exception_for_mismatch(self, mock_inv):
-        resp = client.get("/stream/p2p")
-        assert "quarantine" in resp.text or "exception" in resp.text
-
-    @patch("backend.db.get_invoices", return_value=[{
-        "invoice_id": "INV003", "invoice_number": "VINV-2025-003",
-        "vendor_name": "No PO Corp", "vendor_category": "Services",
-        "invoice_date": "2025-02-01", "due_date": "2025-02-28",
-        "invoice_amount": 200000, "tax_amount": 36000, "invoice_total_inr": 236000,
-        "match_status": "NO_PO_REFERENCE", "has_po_ref": False,
-        "is_overdue": False, "aging_days": 20, "aging_bucket": "0-30",
-        "invoice_status": "EXCEPTION", "po_id": None, "gstin_vendor": "29AABCT1332L1ZV",
-    }])
-    def test_p2p_stream_emits_quarantine_for_no_po(self, mock_inv):
-        resp = client.get("/stream/p2p")
-        assert "quarantine" in resp.text
-
-    @patch("backend.db.get_collections", return_value=[])
-    def test_o2c_stream_200(self, mock_col):
-        resp = client.get("/stream/o2c")
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers.get("content-type", "")
-
-    @patch("backend.db.get_collections", return_value=[])
-    def test_o2c_stream_contains_greeting(self, mock_col):
-        assert "greeting" in client.get("/stream/o2c").text
-
-    @patch("backend.db.get_collections", return_value=[])
-    def test_o2c_stream_contains_summary(self, mock_col):
-        assert "summary" in client.get("/stream/o2c").text
-
-    @patch("backend.db.get_collections", return_value=[{
-        "o2c_invoice_id": "CINV001", "invoice_number": "OINV-001",
-        "customer_name": "Reliance Industries", "segment": "ENTERPRISE",
-        "invoice_status": "OVERDUE", "balance_outstanding": 3000000,
-        "days_overdue": 95, "days_outstanding": 95, "aging_bucket": "90+",
-        "amount_collected_inr": 0, "due_date": "2024-12-31",
-    }])
-    def test_o2c_stream_emits_quarantine_for_critical_overdue(self, mock_col):
-        resp = client.get("/stream/o2c")
-        assert "quarantine" in resp.text
-
-    @patch("backend.db.get_collections", return_value=[{
-        "o2c_invoice_id": "CINV002", "invoice_number": "OINV-002",
-        "customer_name": "Tata Steel", "segment": "ENTERPRISE",
-        "invoice_status": "COLLECTED", "balance_outstanding": 0,
-        "days_overdue": 0, "days_outstanding": 10, "aging_bucket": "0-30",
-        "amount_collected_inr": 1500000, "due_date": "2025-03-31",
-    }])
-    def test_o2c_stream_emits_payment_received_for_collected(self, mock_col):
-        resp = client.get("/stream/o2c")
-        assert "payment_received" in resp.text
-
-    @patch("backend.db.get_journal_entries", return_value=[])
-    def test_r2r_stream_200(self, mock_je):
-        resp = client.get("/stream/r2r")
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers.get("content-type", "")
-
-    @patch("backend.db.get_journal_entries", return_value=[])
-    def test_r2r_stream_contains_greeting(self, mock_je):
-        assert "greeting" in client.get("/stream/r2r").text
-
-    @patch("backend.db.get_journal_entries", return_value=[])
-    def test_r2r_stream_contains_checklist(self, mock_je):
-        resp = client.get("/stream/r2r")
-        # Greeting event should contain checklist
-        lines = [l for l in resp.text.split("\n") if l.startswith("data:")]
-        greeting_found = False
-        for line in lines:
-            try:
-                data = json.loads(line[5:])
-                if data.get("type") == "greeting":
-                    greeting_found = True
-                    assert "checklist" in data["data"]
-                    assert len(data["data"]["checklist"]) == 8
-                    break
-            except Exception:
-                pass
-        assert greeting_found
-
-    @patch("backend.db.get_journal_entries", return_value=[
-        {"je_id": "JE001", "je_number": "JE-2025-001", "je_date": "2025-03-31",
-         "je_type": "STANDARD", "posted_by": "Sunita", "status": "POSTED",
-         "department": "Finance", "gl_line_number": 1, "account_code": "1000",
-         "account_name": "Cash", "debit_inr": 100000, "credit_inr": 0, "gl_description": "Receipt"},
-        {"je_id": "JE001", "je_number": "JE-2025-001", "je_date": "2025-03-31",
-         "je_type": "STANDARD", "posted_by": "Sunita", "status": "POSTED",
-         "department": "Finance", "gl_line_number": 2, "account_code": "2000",
-         "account_name": "Revenue", "debit_inr": 0, "credit_inr": 100000, "gl_description": "Revenue"},
+class TestSqlGuard:
+    @pytest.mark.parametrize("sql", [
+        "DROP TABLE gold_fact_invoices",
+        "CREATE TABLE gold_x AS SELECT 1",
+        "ALTER TABLE gold_fact_gl ADD COLUMN x INT",
+        "GRANT SELECT ON gold_fact_gl TO `someone`",
     ])
-    def test_r2r_stream_emits_journal_entry(self, mock_je):
-        resp = client.get("/stream/r2r")
-        assert "journal_entry" in resp.text
+    def test_rejects_ddl(self, sql):
+        with pytest.raises(SqlGuardError):
+            guard_sql(sql, CAT, SCH)
 
-    @patch("backend.db.get_journal_entries", return_value=[
-        {"je_id": "JE002", "je_number": "JE-2025-002", "je_date": "2025-03-31",
-         "je_type": "STANDARD", "posted_by": "Sunita", "status": "POSTED",
-         "department": "Finance", "gl_line_number": 1, "account_code": "1000",
-         "account_name": "Cash", "debit_inr": 100000, "credit_inr": 0, "gl_description": "Unbalanced"},
+    @pytest.mark.parametrize("sql", [
+        "DELETE FROM gold_fact_invoices",
+        "UPDATE gold_fact_invoices SET release_blocked = false",
+        "INSERT INTO gold_fact_gl SELECT * FROM gold_fact_gl",
+        "MERGE INTO gold_fact_gl t USING gold_fact_gl s ON t.je_id = s.je_id WHEN MATCHED THEN DELETE",
     ])
-    def test_r2r_stream_emits_quarantine_for_unbalanced_je(self, mock_je):
-        resp = client.get("/stream/r2r")
-        assert "quarantine" in resp.text
-
-
-# ═══════════════════════════════════════════════════════════════
-# 6. AP Approve / Reject Button (P2P Tab)
-# ═══════════════════════════════════════════════════════════════
-
-class TestApprovalEndpoint:
-    """Tests the Approve / Reject button handlers in the P2P invoice queue."""
-
-    @patch("backend.lakebase.log_approval", return_value=None)
-    def test_approve_invoice_200(self, mock_log):
-        resp = client.post("/api/approve", json={
-            "invoice_id": INVOICE_ID,
-            "action": "APPROVED",
-            "reason": "Verified with vendor",
-        })
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.log_approval", return_value=None)
-    def test_approve_response_structure(self, mock_log):
-        resp = client.post("/api/approve", json={
-            "invoice_id": INVOICE_ID, "action": "APPROVED", "reason": "",
-        })
-        body = resp.json()
-        assert body["status"] == "logged"
-        assert body["action"] == "APPROVED"
-        assert body["invoice_id"] == INVOICE_ID
-
-    @patch("backend.lakebase.log_approval", return_value=None)
-    def test_reject_invoice_200(self, mock_log):
-        resp = client.post("/api/approve", json={
-            "invoice_id": INVOICE_ID, "action": "REJECTED", "reason": "Duplicate invoice",
-        })
-        assert resp.status_code == 200
-        assert resp.json()["action"] == "REJECTED"
-
-    @patch("backend.lakebase.log_approval", return_value=None)
-    def test_escalate_invoice_200(self, mock_log):
-        resp = client.post("/api/approve", json={
-            "invoice_id": INVOICE_ID, "action": "ESCALATED", "reason": "Needs manager review",
-        })
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.log_approval", return_value=None)
-    def test_approval_with_user_header(self, mock_log):
-        resp = client.post(
-            "/api/approve",
-            json={"invoice_id": INVOICE_ID, "action": "APPROVED", "reason": ""},
-            headers={"x-forwarded-email": "demo.user@example.com"},
-        )
-        assert resp.status_code == 200
-        mock_log.assert_called_once()
-        call_args = mock_log.call_args[0]
-        assert "demo.user@example.com" in call_args
-
-    @patch("backend.lakebase.log_approval", return_value=None)
-    def test_approval_without_reason_is_valid(self, mock_log):
-        resp = client.post("/api/approve", json={"invoice_id": INVOICE_ID, "action": "APPROVED"})
-        assert resp.status_code == 200
-
-    def test_approval_missing_invoice_id_returns_422(self):
-        resp = client.post("/api/approve", json={"action": "APPROVED"})
-        assert resp.status_code == 422
-
-    def test_approval_missing_action_returns_422(self):
-        resp = client.post("/api/approve", json={"invoice_id": INVOICE_ID})
-        assert resp.status_code == 422
-
-    @patch("backend.lakebase.log_approval", side_effect=Exception("Lakebase down"))
-    def test_approval_lakebase_error_returns_500(self, mock_log):
-        resp = client.post("/api/approve", json={
-            "invoice_id": INVOICE_ID, "action": "APPROVED", "reason": "",
-        })
-        assert resp.status_code == 500
-        assert "error" in resp.json()
-
-
-# ═══════════════════════════════════════════════════════════════
-# 7. AR Call Log Button (O2C Tab)
-# ═══════════════════════════════════════════════════════════════
-
-class TestCallLogEndpoint:
-    """Tests the 'Log Call' button in the AR collections queue."""
-
-    @patch("backend.lakebase.log_call", return_value=None)
-    def test_call_log_reached_ptp(self, mock_log):
-        resp = client.post("/api/call-log", json={
-            "customer_id": "CUST001",
-            "customer_name": "Reliance Industries",
-            "outcome": "REACHED_PTP",
-            "ptp_date": "2025-04-15",
-            "notes": "Customer committed to pay by 15th April",
-        })
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "logged"
-
-    @patch("backend.lakebase.log_call", return_value=None)
-    def test_call_log_reached_dispute(self, mock_log):
-        resp = client.post("/api/call-log", json={
-            "customer_id": "CUST002",
-            "customer_name": "Tata Steel",
-            "outcome": "REACHED_DISPUTE",
-            "notes": "Disputing invoice amount",
-        })
-        assert resp.status_code == 200
-        assert resp.json()["outcome"] == "REACHED_DISPUTE"
-
-    @patch("backend.lakebase.log_call", return_value=None)
-    def test_call_log_voicemail(self, mock_log):
-        resp = client.post("/api/call-log", json={
-            "customer_id": "CUST003",
-            "customer_name": "Infosys",
-            "outcome": "VOICEMAIL",
-            "notes": "Left voicemail, follow up tomorrow",
-        })
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.log_call", return_value=None)
-    def test_call_log_escalate(self, mock_log):
-        resp = client.post("/api/call-log", json={
-            "customer_id": "CUST004",
-            "customer_name": "Wipro",
-            "outcome": "ESCALATE",
-            "notes": "Escalating to credit manager",
-        })
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.log_call", return_value=None)
-    def test_call_log_without_optional_fields(self, mock_log):
-        resp = client.post("/api/call-log", json={
-            "customer_id": "CUST005",
-            "outcome": "VOICEMAIL",
-        })
-        assert resp.status_code == 200
-
-    def test_call_log_missing_customer_id_returns_422(self):
-        resp = client.post("/api/call-log", json={"outcome": "VOICEMAIL"})
-        assert resp.status_code == 422
-
-    def test_call_log_missing_outcome_returns_422(self):
-        resp = client.post("/api/call-log", json={"customer_id": "CUST001"})
-        assert resp.status_code == 422
-
-    @patch("backend.lakebase.log_call", return_value=None)
-    def test_call_log_ptp_date_null_for_non_ptp(self, mock_log):
-        resp = client.post("/api/call-log", json={
-            "customer_id": "CUST001",
-            "outcome": "VOICEMAIL",
-            "ptp_date": None,
-        })
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.log_call", side_effect=Exception("DB error"))
-    def test_call_log_lakebase_error_returns_500(self, mock_log):
-        resp = client.post("/api/call-log", json={
-            "customer_id": "CUST001", "outcome": "VOICEMAIL",
-        })
-        assert resp.status_code == 500
-
-
-# ═══════════════════════════════════════════════════════════════
-# 8. Invoice Viewer (View Invoice button from ExceptionDrawer)
-# ═══════════════════════════════════════════════════════════════
-
-class TestInvoiceEndpoint:
-    """Tests the invoice detail view opened via ExceptionDrawer → 'View Invoice'."""
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    def test_get_invoice_by_id_200(self, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}")
-        assert resp.status_code == 200
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    def test_get_invoice_response_structure(self, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}")
-        body = resp.json()
-        required = ["invoice_id", "invoice_number", "quarantine_reason",
-                    "vendor_id", "vendor_name", "po_id", "invoice_date",
-                    "due_date", "invoice_amount", "po_amount", "status",
-                    "gstin", "payment_terms", "raw_text", "file_path"]
-        for field in required:
-            assert field in body, f"Missing field: {field}"
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    def test_get_invoice_amounts_are_float(self, mock_q):
-        body = client.get(f"/api/invoice/{INVOICE_ID}").json()
-        assert isinstance(body["invoice_amount"], float)
-        assert isinstance(body["po_amount"], float)
-
-    @patch("backend.db.query", return_value=[])
-    def test_get_invoice_not_found_returns_404(self, mock_q):
-        resp = client.get("/api/invoice/NONEXISTENT")
-        assert resp.status_code == 404
-
-    @patch("backend.db.query", return_value=[{**MOCK_INVOICE_ROW, "invoice_id": None,
-                                               "exception_type": None}])
-    def test_get_invoice_by_erp_number(self, mock_q):
-        resp = client.get(f"/api/invoice/{ERP_INVOICE_NUMBER}")
-        assert resp.status_code == 200
-
-    @patch("backend.db.query", side_effect=Exception("Query failed"))
-    def test_get_invoice_db_error_returns_500(self, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}")
-        assert resp.status_code == 500
-
-
-# ═══════════════════════════════════════════════════════════════
-# 9. Invoice PDF Download Button
-# ═══════════════════════════════════════════════════════════════
-
-class TestInvoicePDFEndpoint:
-    """Tests the 'Download PDF' button in InvoiceDrawer."""
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    @patch("backend.invoice_pdf.build_invoice_pdf", return_value=b"%PDF-1.4 fake pdf bytes")
-    def test_pdf_returns_200(self, mock_pdf, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}/pdf")
-        assert resp.status_code == 200
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    @patch("backend.invoice_pdf.build_invoice_pdf", return_value=b"%PDF-1.4 fake")
-    def test_pdf_content_type_is_pdf(self, mock_pdf, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}/pdf")
-        assert "application/pdf" in resp.headers.get("content-type", "")
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    @patch("backend.invoice_pdf.build_invoice_pdf", return_value=b"%PDF-1.4 fake")
-    def test_pdf_inline_by_default(self, mock_pdf, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}/pdf")
-        assert "inline" in resp.headers.get("content-disposition", "")
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    @patch("backend.invoice_pdf.build_invoice_pdf", return_value=b"%PDF-1.4 fake")
-    def test_pdf_download_param_sets_attachment(self, mock_pdf, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}/pdf?download=true")
-        assert "attachment" in resp.headers.get("content-disposition", "")
-
-    @patch("backend.db.query", return_value=[MOCK_INVOICE_ROW])
-    @patch("backend.invoice_pdf.build_invoice_pdf", return_value=b"%PDF-1.4 fake")
-    def test_pdf_filename_includes_invoice_id(self, mock_pdf, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}/pdf")
-        assert INVOICE_ID in resp.headers.get("content-disposition", "")
-
-    @patch("backend.db.query", return_value=[])
-    def test_pdf_not_found_returns_404(self, mock_q):
-        resp = client.get("/api/invoice/NONEXISTENT/pdf")
-        assert resp.status_code == 404
-
-    @patch("backend.db.query", side_effect=Exception("DB timeout"))
-    def test_pdf_db_error_returns_500(self, mock_q):
-        resp = client.get(f"/api/invoice/{INVOICE_ID}/pdf")
-        assert resp.status_code == 500
-
-
-# ═══════════════════════════════════════════════════════════════
-# 10. AI Chat — Send Button
-# ═══════════════════════════════════════════════════════════════
-
-class TestChatEndpoint:
-    """Tests the AI chat Send button and SSE streaming response."""
-
-    def _mock_stream(self, text="DPO is 38 days, within the 30-45 day healthy range."):
-        async def _gen(messages, user_token=None, previous_response_id=None):
-            for word in text.split():
-                yield {"type": "chunk", "text": word + " "}
-            yield {"type": "done", "response_id": None, "tool": None}
-        return _gen
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_returns_streaming_response(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream()
-        resp = client.post("/api/chat", json={
-            "question": "What is the current DPO?",
-            "active_tab": "P2P",
-        })
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_content_type_is_event_stream(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream()
-        resp = client.post("/api/chat", json={"question": "What is DSO?", "active_tab": "O2C"})
-        assert "text/event-stream" in resp.headers.get("content-type", "")
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_emits_chunk_events(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("Hello World")
-        resp = client.post("/api/chat", json={"question": "Hi", "active_tab": "P2P"})
-        assert '"type": "chunk"' in resp.text
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_emits_done_event(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("Answer here")
-        resp = client.post("/api/chat", json={"question": "Test", "active_tab": "P2P"})
-        assert '"type": "done"' in resp.text
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_done_event_includes_session_id(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("Test answer")
-        resp = client.post("/api/chat", json={"question": "Test", "active_tab": "P2P"})
-        lines = [l for l in resp.text.split("\n") if l.startswith("data:")]
-        done_events = [json.loads(l[5:]) for l in lines if '"type": "done"' in l]
-        assert len(done_events) > 0
-        assert "session_id" in done_events[0]
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_uses_provided_session_id(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("Test")
-        session_id = "my-test-session-123"
-        resp = client.post("/api/chat", json={
-            "question": "Test", "active_tab": "P2P", "session_id": session_id,
-        })
-        lines = [l for l in resp.text.split("\n") if l.startswith("data:")]
-        done_events = [json.loads(l[5:]) for l in lines if '"type": "done"' in l]
-        assert done_events[0]["session_id"] == session_id
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_generates_session_id_if_empty(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("Test")
-        resp = client.post("/api/chat", json={"question": "Test", "active_tab": "P2P"})
-        lines = [l for l in resp.text.split("\n") if l.startswith("data:")]
-        done_events = [json.loads(l[5:]) for l in lines if '"type": "done"' in l]
-        assert done_events[0]["session_id"]  # non-empty UUID
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_with_o2c_tab(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("DSO is 38 days.")
-        resp = client.post("/api/chat", json={"question": "What is DSO?", "active_tab": "O2C"})
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_with_r2r_tab(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("Trial balance is balanced.")
-        resp = client.post("/api/chat", json={
-            "question": "Is trial balance balanced?", "active_tab": "R2R",
-        })
-        assert resp.status_code == 200
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_persists_to_lakebase(self, mock_stream, mock_log, mock_hist):
-        mock_stream.side_effect = self._mock_stream("Answer persisted")
-        client.post("/api/chat", json={"question": "Test persistence", "active_tab": "P2P"})
-        mock_log.assert_called_once()
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_empty_answer_uses_fallback(self, mock_stream, mock_log, mock_hist):
-        async def _empty_gen(messages, user_token=None, previous_response_id=None):
-            yield {"type": "done", "response_id": None, "tool": None}
-        mock_stream.side_effect = _empty_gen
-        resp = client.post("/api/chat", json={"question": "Test", "active_tab": "P2P"})
-        assert "No answer returned" in resp.text or '"type": "chunk"' in resp.text
-
-    def test_chat_missing_question_returns_422(self):
-        resp = client.post("/api/chat", json={"active_tab": "P2P"})
-        assert resp.status_code == 422
-
-    @patch("backend.lakebase.get_session_messages", return_value=[])
-    @patch("backend.lakebase.log_chat", return_value=None)
-    @patch("backend.main.stream_mas_agent")
-    def test_chat_stream_error_emits_error_event(self, mock_stream, mock_log, mock_hist):
-        async def _error_gen(messages, user_token=None, previous_response_id=None):
-            yield {"type": "error", "message": "Model unavailable"}
-        mock_stream.side_effect = _error_gen
-        resp = client.post("/api/chat", json={"question": "Test", "active_tab": "P2P"})
-        assert '"type": "error"' in resp.text
-
-
-# ═══════════════════════════════════════════════════════════════
-# 11. Session History (AI Chat History Panel)
-# ═══════════════════════════════════════════════════════════════
-
-class TestSessionHistory:
-    """Tests the chat history panel buttons."""
-
-    @patch("backend.lakebase.get_user_sessions", return_value=[
-        {"session_id": "abc123", "first_question": "What is DPO?",
-         "tab": "P2P", "started_at": "2025-03-01T10:00:00", "last_active": "2025-03-01T10:05:00",
-         "message_count": 3},
+    def test_rejects_dml(self, sql):
+        with pytest.raises(SqlGuardError):
+            guard_sql(sql, CAT, SCH)
+
+    def test_rejects_multiple_statements(self):
+        with pytest.raises(SqlGuardError, match="exactly one statement"):
+            guard_sql("SELECT * FROM gold_fact_gl; DROP TABLE gold_fact_gl", CAT, SCH)
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM bronze_vendors",
+        "SELECT * FROM silver_invoice_extractions",          # masked PII source, not on list
+        "SELECT * FROM system.access.audit",
+        "SELECT * FROM gold_fact_invoices WHERE vendor_id IN (SELECT vendor_id FROM bronze_vendors)",
     ])
-    def test_my_sessions_200(self, mock_sessions):
-        resp = client.get("/api/my-sessions")
-        assert resp.status_code == 200
+    def test_rejects_off_list_tables(self, sql):
+        with pytest.raises(SqlGuardError, match="allow-list"):
+            guard_sql(sql, CAT, SCH)
 
-    @patch("backend.lakebase.get_user_sessions", return_value=[])
-    def test_my_sessions_returns_empty_list(self, mock_sessions):
-        resp = client.get("/api/my-sessions")
-        assert resp.json()["sessions"] == []
+    def test_rejects_other_schema(self):
+        with pytest.raises(SqlGuardError, match="schema"):
+            guard_sql("SELECT * FROM other_schema.gold_fact_gl", CAT, SCH)
 
-    @patch("backend.lakebase.get_user_sessions", return_value=[
-        {"session_id": "abc123", "first_question": "What is DPO?",
-         "tab": "P2P", "started_at": "2025-03-01T10:00:00",
-         "last_active": "2025-03-01T10:05:00", "message_count": 3},
-    ])
-    def test_my_sessions_with_email_header(self, mock_sessions):
-        resp = client.get("/api/my-sessions",
-                          headers={"x-forwarded-email": "demo.user@example.com"})
-        assert resp.status_code == 200
-        mock_sessions.assert_called_with("demo.user@example.com")
+    def test_adds_limit_and_qualifies(self):
+        out = guard_sql("SELECT invoice_id FROM gold_fact_invoices", CAT, SCH)
+        assert out.endswith("LIMIT 100")
+        assert f"{CAT}.{SCH}.gold_fact_invoices" in out
 
-    @patch("backend.lakebase.get_session_detail", return_value={
-        "messages": [
-            {"role": "user", "content": "What is DPO?"},
-            {"role": "assistant", "content": "DPO is 38 days."},
-        ],
-        "previous_response_id": None,
-    })
-    def test_get_session_detail_200(self, mock_detail):
-        resp = client.get("/api/session/abc123")
-        assert resp.status_code == 200
+    def test_clamps_large_limit(self):
+        assert guard_sql("SELECT * FROM gold_fact_gl LIMIT 5000", CAT, SCH).endswith("LIMIT 100")
 
-    @patch("backend.lakebase.get_session_detail", return_value={
-        "messages": [], "previous_response_id": None,
-    })
-    def test_get_session_detail_structure(self, mock_detail):
-        resp = client.get("/api/session/abc123")
-        body = resp.json()
-        assert "session_id" in body
-        assert "messages" in body
-        assert "previous_response_id" in body
+    def test_keeps_small_limit_and_ctes(self):
+        out = guard_sql("WITH x AS (SELECT * FROM gold_recon_subledger_vs_gl) SELECT * FROM x LIMIT 5", CAT, SCH)
+        assert out.endswith("LIMIT 5")
 
-    @patch("backend.lakebase.get_user_sessions", side_effect=Exception("Lakebase error"))
-    def test_my_sessions_lakebase_error_returns_empty(self, mock_sessions):
-        resp = client.get("/api/my-sessions")
-        body = resp.json()
-        assert "sessions" in body  # Graceful degradation
-        assert body["sessions"] == []
+    def test_allows_exceptions_and_eval_tables(self):
+        guard_sql("SELECT exception_type, COUNT(*) FROM silver_invoice_exceptions GROUP BY 1", CAT, SCH)
+        guard_sql("SELECT * FROM gold_ai_extraction_eval", CAT, SCH)
+
+    def test_sql_agent_refuses_generated_ddl(self):
+        async def fake_fmapi(*a, **k):
+            return "DROP TABLE gold_fact_invoices"
+        with patch.object(chat, "_fmapi_chat", fake_fmapi), \
+             patch.object(chat.db, "query") as q:
+            events = run(chat.stream_sql_agent("drop everything"))
+        assert events[-1]["type"] == "error" and "rejected by policy" in events[-1]["message"]
+        q.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════
-# 12. Approvals History
+# F2 — touchless excludes release-blocked; verify-invoice HOLDs
 # ═══════════════════════════════════════════════════════════════
 
-class TestApprovalsHistory:
+class TestTouchless:
+    def test_touchless_query_excludes_release_blocked(self):
+        seen = []
 
-    @patch("backend.lakebase.get_user_approvals", return_value=[
-        {"invoice_id": INVOICE_ID, "action": "APPROVED", "reason": "",
-         "actioned_by": "demo.user@example.com", "actioned_at": "2025-03-01T10:00:00"},
-    ])
-    def test_my_approvals_200(self, mock_approvals):
-        resp = client.get("/api/my-approvals")
-        assert resp.status_code == 200
-        assert "approvals" in resp.json()
+        def fake_query(sql, params=None):
+            seen.append(sql)
+            if "silver_invoice_exceptions" in sql:
+                return [{"exception_type": "EXTRACTION_MISMATCH", "n": 3},
+                        {"exception_type": "NO_PO_REFERENCE", "n": 7}]
+            return [{"total_invoices": 100, "matched": 40, "touchless": 37, "release_blocked": 3,
+                     "release_blocked_amount": 900.0, "amount_mismatch": 5, "no_po": 7, "two_way": 2,
+                     "overdue_count": 1, "total_amount": 10.0, "overdue_amount": 1.0,
+                     "avg_aging_days": 20, "touchless_rate": 37.0}]
 
-    @patch("backend.lakebase.get_user_approvals", return_value=[])
-    def test_my_approvals_empty_list(self, mock_approvals):
-        assert client.get("/api/my-approvals").json()["approvals"] == []
+        with patch.object(db, "query", side_effect=fake_query):
+            m = db.get_p2p_metrics()
+        kpi_sql = seen[0]
+        assert "NOT COALESCE(release_blocked, false)" in kpi_sql
+        assert kpi_sql.count(db.TOUCHLESS_PREDICATE) >= 2  # count + rate
+        assert m["touchless"] == 37 and m["matched"] == 40 and m["release_blocked"] == 3
+        assert m["extraction_mismatch"] == 3 and m["exceptions"] == 10
+
+    def test_verify_invoice_holds_release_blocked(self, client):
+        inv = {"invoice_id": "INV000033", "invoice_number": "VINV-2026-1", "vendor_id": "VND0001",
+               "vendor_name": "Acme", "po_id": "PO00001", "invoice_amount": 100.0,
+               "invoice_total_inr": 118.0, "gstin_vendor": "27ABCDE1234F1Z5", "match_status": "THREE_WAY_MATCHED",
+               "release_blocked": True, "block_reason": "PDF total differs from ERP by -10.0%",
+               "po_total_amount": 100.0, "vendor_master_gstin": "27ABCDE1234F1Z5", "vendor_is_active": True,
+               "extracted_vendor_name": "Acme", "extracted_total_amount": 106.2,
+               "extracted_gstin": "27ABCDE1234F1Z5", "extracted_po_reference": "PO00001"}
+
+        def fake_query(sql, params=None):
+            if "gold_recon_subledger_vs_gl" in sql:
+                return [{"account_code": "2000", "account_name": "AP", "subledger_amount": 10.0,
+                         "gl_amount": 8.0, "delta": 2.0, "reconciling_items_amount": 2.0,
+                         "reconciling_items_count": 1, "unexplained_delta": 0.0}]
+            if "gold_recon_reconciling_items" in sql:
+                return []
+            if "COUNT(*) AS dups" in sql:
+                return [{"dups": 0}]
+            return [inv]
+
+        with patch.object(db, "query", side_effect=fake_query):
+            r = client.get("/api/verify-invoice/INV000033")
+        body = r.json()
+        assert r.status_code == 200
+        assert body["release_blocked"] is True
+        assert body["recommendation"]["label"] == "HOLD"
+        ai = next(c for c in body["checks"] if c["id"] == 2)
+        assert ai["status"] == "FAIL" and "RELEASE BLOCKED" in ai["detail"]
+        assert body["pdf_total"] == 106.2 and body["erp_total"] == 118.0
 
 
 # ═══════════════════════════════════════════════════════════════
-# 13. Frontend Static Files
+# F1 — reconciliation
 # ═══════════════════════════════════════════════════════════════
 
-class TestStaticFiles:
-    """Tests that the React app is being served correctly."""
+class TestRecon:
+    ROW = {"account_code": "1100", "account_name": "Accounts Receivable", "subledger_source": "gold_fact_collections",
+           "subledger_amount": 1000.0, "gl_amount": 700.0, "delta": 300.0,
+           "reconciling_items_amount": 300.0, "reconciling_items_count": 2,
+           "unexplained_delta": 0.0, "tied": True, "cutoff_date": "2026-09-30"}
+    ITEMS = [{"account_code": "1100", "document_id": "CINV000010", "document_type": "AR_INVOICE",
+              "amount": 200.0, "reason": "Posted to sub-ledger after GL cut-off", "gl_je_id": None, "gl_je_status": None},
+             {"account_code": "1100", "document_id": "CINV000011", "document_type": "AR_INVOICE",
+              "amount": 100.0, "reason": "Posted to sub-ledger after GL cut-off", "gl_je_id": None, "gl_je_status": None}]
 
-    def test_root_serves_index_html(self):
-        resp = client.get("/")
-        assert resp.status_code == 200
+    def test_tied_with_explained_items(self):
+        out = db.shape_recon([self.ROW], self.ITEMS)
+        r = out["rows"][0]
+        assert r["delta"] == 300.0 and r["reconciling_items_amount"] == 300.0
+        assert r["tied"] is True and out["all_tied"] is True
+        assert len(r["items"]) == 2
 
-    def test_unknown_path_serves_spa_fallback(self):
-        resp = client.get("/some/deep/route")
-        # SPA fallback should return index.html (200) or 404 if frontend not built
-        assert resp.status_code in (200, 404)
+    def test_not_tied_when_unexplained(self):
+        bad = {**self.ROW, "reconciling_items_amount": 250.0, "unexplained_delta": 50.0, "tied": True}
+        out = db.shape_recon([bad], self.ITEMS)
+        # The stored flag is ignored: arithmetic decides.
+        assert out["rows"][0]["tied"] is False and out["all_tied"] is False
 
-    def test_api_path_not_caught_by_spa(self):
-        resp = client.get("/api/nonexistent-endpoint")
-        assert resp.status_code == 404
+    def test_unexplained_derived_when_missing(self):
+        row = {k: v for k, v in self.ROW.items() if k != "unexplained_delta"}
+        row["reconciling_items_amount"] = 100.0
+        assert db.shape_recon([row], [])["rows"][0]["unexplained_delta"] == 200.0
 
-    def test_stream_path_not_caught_by_spa(self):
-        """Stream paths should not be caught by the SPA fallback."""
-        # This would hang as SSE, but the path prefix check should work
-        # We just verify it doesn't 404 from the SPA handler
-        pass  # Covered by SSE tests above
+    def test_no_rows_is_not_tied(self):
+        assert db.shape_recon([], [])["all_tied"] is False
+
+    def test_recon_endpoint(self, client):
+        def fake_query(sql, params=None):
+            return [self.ROW] if "subledger_vs_gl" in sql else self.ITEMS
+        with patch.object(db, "query", side_effect=fake_query):
+            r = client.get("/api/recon")
+        j = r.json()
+        assert r.status_code == 200 and j["all_tied"] is True
+        assert j["rows"][0]["reconciling_items_count"] == 2
 
 
 # ═══════════════════════════════════════════════════════════════
-# 14. Exception Detection Logic
+# F5 — chat routing / Genie
 # ═══════════════════════════════════════════════════════════════
 
-class TestExceptionDetection:
-    """Tests the server-side exception detection rules (not UI buttons)."""
+class TestChatRouting:
+    def test_genie_when_mas_empty(self):
+        with patch.object(chat, "MAS_ENDPOINT", ""), patch.object(chat, "GENIE_SPACE_ID", "space-1"):
+            assert chat.select_route() == "genie"
 
-    def test_amount_mismatch_detected(self):
-        from backend.streams import _detect_p2p_exceptions
-        excs = _detect_p2p_exceptions({"match_status": "AMOUNT_MISMATCH", "po_id": "PO-001"})
-        assert any(e["rule"] == "amount_match" for e in excs)
-        assert any(e["severity"] == "high" for e in excs)
+    def test_mas_wins_when_set(self):
+        with patch.object(chat, "MAS_ENDPOINT", "mas-x"), patch.object(chat, "GENIE_SPACE_ID", "space-1"):
+            assert chat.select_route() == "mas"
 
-    def test_no_po_reference_detected(self):
-        from backend.streams import _detect_p2p_exceptions
-        excs = _detect_p2p_exceptions({"match_status": "NO_PO_REFERENCE"})
-        assert any(e["rule"] == "has_po_ref" for e in excs)
+    def test_sql_agent_last_resort(self):
+        with patch.object(chat, "MAS_ENDPOINT", ""), patch.object(chat, "GENIE_SPACE_ID", ""):
+            assert chat.select_route() == "sql_agent"
 
-    def test_overdue_critical_detected(self):
-        from backend.streams import _detect_p2p_exceptions
-        excs = _detect_p2p_exceptions({"match_status": "THREE_WAY_MATCHED",
-                                        "is_overdue": "true", "aging_days": 65})
-        assert any(e["rule"] == "overdue_critical" for e in excs)
-        assert any(e["severity"] == "critical" for e in excs)
+    def test_stream_uses_genie_route(self):
+        async def fake_ask(q, user_token=None, conversation_id=None):
+            return {"text": "3 invoices are blocked.", "sql": "SELECT 1", "columns": ["invoice_id"],
+                    "rows": [["INV000033"]], "conversation_id": "c1", "message_id": "m1",
+                    "status": "COMPLETED", "auth": "obo"}
+        with patch.object(chat, "MAS_ENDPOINT", ""), patch.object(chat, "GENIE_SPACE_ID", "space-1"), \
+             patch.object(chat, "ask_genie", fake_ask):
+            evs = run(chat.stream_mas_agent([{"role": "user", "content": "blocked?"}], user_token="u"))
+        text = "".join(e["text"] for e in evs if e["type"] == "chunk")
+        done = evs[-1]
+        assert "INV000033" in text and "| invoice_id |" in text
+        assert done["route"] == "genie" and done["response_id"] == "genie:c1" and done["sql"] == "SELECT 1"
 
-    def test_missing_gstin_detected(self):
-        from backend.streams import _detect_p2p_exceptions
-        excs = _detect_p2p_exceptions({"match_status": "THREE_WAY_MATCHED", "gstin_vendor": None})
-        assert any(e["rule"] == "missing_gstin" for e in excs)
+    def test_genie_failure_falls_back_to_sql_agent(self):
+        async def boom(*a, **k):
+            raise RuntimeError("space not found")
 
-    def test_three_way_matched_no_exception(self):
-        from backend.streams import _detect_p2p_exceptions
-        excs = _detect_p2p_exceptions({
-            "match_status": "THREE_WAY_MATCHED",
-            "is_overdue": "false",
-            "aging_days": 15,
-            "gstin_vendor": "29AABCT1332L1ZV",
-        })
-        assert not any(e["rule"] in ("amount_match", "has_po_ref") for e in excs)
+        async def fake_sql_agent(question, active_tab="P2P", user_token=None, history=None):
+            yield {"type": "chunk", "text": "fallback answer"}
+            yield {"type": "done", "route": "sql_agent", "response_id": None, "tool": "finance-sql-agent"}
 
-    def test_written_off_quarantine(self):
-        from backend.streams import _detect_o2c_exceptions
-        excs = _detect_o2c_exceptions({
-            "invoice_status": "WRITTEN_OFF",
-            "balance_outstanding": 500000,
-            "days_overdue": 0,
-        })
-        assert any(e["rule"] == "written_off" for e in excs)
-        assert any(e["type"] == "quarantine" for e in excs)
+        with patch.object(chat, "MAS_ENDPOINT", ""), patch.object(chat, "GENIE_SPACE_ID", "space-1"), \
+             patch.object(chat, "ask_genie", boom), patch.object(chat, "stream_sql_agent", fake_sql_agent):
+            evs = run(chat.stream_mas_agent([{"role": "user", "content": "q"}]))
+        assert evs[-1]["route"] == "sql_agent"
+        assert any("Genie unavailable" in e.get("text", "") for e in evs)
 
-    def test_critical_overdue_o2c(self):
-        from backend.streams import _detect_o2c_exceptions
-        excs = _detect_o2c_exceptions({
-            "invoice_status": "OVERDUE",
-            "balance_outstanding": 3000000,
-            "days_overdue": 95,
-        })
-        assert any(e["rule"] == "critical_overdue" for e in excs)
+    def test_ask_genie_api_flow_with_obo_then_sp_fallback(self):
+        calls = []
 
-    def test_aging_concern_o2c(self):
-        from backend.streams import _detect_o2c_exceptions
-        excs = _detect_o2c_exceptions({
-            "invoice_status": "OVERDUE",
-            "balance_outstanding": 1000000,
-            "days_overdue": 65,
-        })
-        assert any(e["rule"] == "aging_concern" for e in excs)
-        assert any(e["severity"] == "high" for e in excs)
+        async def fake_http(session, method, url, token, payload=None):
+            calls.append((method, url.split("/spaces/space-1")[1], token))
+            if url.endswith("/start-conversation"):
+                if token == "user-tok":
+                    return 403, {"error": "missing scope"}
+                return 200, {"conversation_id": "c9", "message_id": "m9"}
+            if url.endswith("/query-result"):
+                return 200, {"statement_response": {
+                    "manifest": {"schema": {"columns": [{"name": "n"}]}},
+                    "result": {"data_array": [["3"]]}}}
+            return 200, {"status": "COMPLETED", "attachments": [
+                {"attachment_id": "a1", "query": {"query": "SELECT COUNT(*) n FROM x", "description": "Count"}}]}
 
-    def test_unbalanced_je_quarantine(self):
-        from backend.streams import _detect_r2r_exceptions
-        je = {"posted_by": "Sunita"}
-        lines = [
-            {"debit_inr": 100000, "credit_inr": 0},
-            {"debit_inr": 0, "credit_inr": 90000},  # unbalanced
+        with patch.object(chat, "GENIE_SPACE_ID", "space-1"), patch.object(chat, "_http", fake_http), \
+             patch.object(chat, "get_token", return_value="sp-tok"):
+            res = asyncio.run(chat.ask_genie("how many?", user_token="user-tok"))
+        assert res["auth"] == "sp" and res["rows"] == [["3"]] and res["sql"].startswith("SELECT")
+        assert calls[0][2] == "user-tok" and calls[1][2] == "sp-tok"
+        assert any(c[1].endswith("/attachments/a1/query-result") for c in calls)
+
+
+# ═══════════════════════════════════════════════════════════════
+# F6 — no silent mock data
+# ═══════════════════════════════════════════════════════════════
+
+class TestNoSilentMocks:
+    def test_typed_503_banner_and_recovery(self, client):
+        with patch.object(db, "RETRIES", 2), patch.object(db, "BACKOFF_S", 0), \
+             patch.object(db, "get_connection", side_effect=ConnectionError("warehouse STARTING")):
+            r = client.get("/api/metrics/p2p")
+            s = client.get("/api/data-status").json()
+        assert r.status_code == 503 and r.json()["error"] == "warehouse_unavailable"
+        assert s["live"] is False and s["banner"].startswith("Warehouse starting")
+
+        cur = MagicMock()
+        cur.description = [("ok",)]
+        cur.fetchall.return_value = [(1,)]
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        with patch.object(db, "get_connection", return_value=conn):
+            s2 = client.get("/api/data-status").json()
+        assert s2["live"] is True and s2["banner"] is None  # recovered without restart
+
+    def test_statement_error_is_not_an_outage(self):
+        with patch.object(db, "get_connection",
+                          side_effect=Exception("[TABLE_OR_VIEW_NOT_FOUND] gold_x not found")):
+            with pytest.raises(db.QueryError):
+                db.query("SELECT * FROM gold_x")
+        assert db._status["live"] is True
+
+    def test_demo_mode_only_when_explicit(self, client):
+        assert config.DEMO_MODE is False
+        with patch.object(db, "DEMO_MODE", True), patch.object(main, "DEMO_MODE", True):
+            m = client.get("/api/metrics/p2p").json()["metrics"]
+            s = client.get("/api/data-status").json()
+        assert m["demo"] is True
+        assert s["banner"].startswith("Demo data")
+
+    def test_unknown_invoice_is_404_not_fixture(self, client):
+        with patch.object(db, "query", return_value=[]):
+            r = client.get("/api/invoice/INV999999")
+        assert r.status_code == 404
+
+    def test_auto_matched_from_data_and_date_order(self):
+        rows = [  # newest first, as the query returns them
+            {"o2c_invoice_id": "C3", "invoice_date": "2026-09-03", "amount_collected_inr": 0, "balance_outstanding": 5,
+             "auto_matched": False, "days_overdue": 0, "invoice_status": "OUTSTANDING"},
+            {"o2c_invoice_id": "C2", "invoice_date": "2026-09-02", "amount_collected_inr": 40, "balance_outstanding": 60,
+             "auto_matched": False, "days_overdue": 0, "invoice_status": "PARTIAL_PAID"},
+            {"o2c_invoice_id": "C1", "invoice_date": "2026-09-01", "amount_collected_inr": 100, "balance_outstanding": 0,
+             "auto_matched": True, "days_overdue": 0, "invoice_status": "PAID"},
         ]
-        excs = _detect_r2r_exceptions(je, lines)
-        assert any(e["rule"] == "je_balanced" for e in excs)
-        assert any(e["type"] == "quarantine" for e in excs)
 
-    def test_balanced_je_no_quarantine(self):
-        from backend.streams import _detect_r2r_exceptions
-        je = {"posted_by": "Sunita"}
-        lines = [
-            {"debit_inr": 100000, "credit_inr": 0},
-            {"debit_inr": 0, "credit_inr": 100000},
-        ]
-        excs = _detect_r2r_exceptions(je, lines)
-        assert not any(e["rule"] == "je_balanced" for e in excs)
+        async def nosleep(*_):
+            return None
 
-    def test_high_value_je_exception(self):
-        from backend.streams import _detect_r2r_exceptions
-        je = {"posted_by": "Vikram"}
-        lines = [
-            {"debit_inr": 6000000, "credit_inr": 0},
-            {"debit_inr": 0, "credit_inr": 6000000},
-        ]
-        excs = _detect_r2r_exceptions(je, lines)
-        assert any(e["rule"] == "high_value_je" for e in excs)
+        with patch.object(db, "get_collections", return_value=rows), patch.object(streams.asyncio, "sleep", nosleep):
+            evs = [json.loads(e) for e in run(streams.stream_o2c())]
+        feed = [e for e in evs if e["type"] in ("payment_received", "collection")]
+        assert [e["data"]["o2c_invoice_id"] for e in feed] == ["C1", "C2", "C3"]
+        pays = {e["data"]["o2c_invoice_id"]: e["data"]["auto_matched"] for e in feed if e["type"] == "payment_received"}
+        assert pays == {"C1": True, "C2": False}
+
+    def test_streams_use_random_only_for_timing(self):
+        src = open(os.path.join(APP_DIR, "backend", "streams.py")).read()
+        import re
+        uses = re.findall(r"random\.(\w+)", src)
+        assert set(uses) <= {"uniform"}, uses
+        assert "shuffle" not in src
+
+    def test_stream_emits_typed_error(self):
+        with patch.object(db, "get_invoices", side_effect=db.WarehouseUnavailable("down")):
+            evs = [json.loads(e) for e in run(streams.stream_p2p())]
+        assert evs == [{"type": "error", "data": {"error": "warehouse_unavailable", "message": "down"}}]
+
+    def test_p2p_stream_flags_release_blocked(self):
+        inv = {"invoice_id": "INV000033", "match_status": "THREE_WAY_MATCHED", "release_blocked": True,
+               "block_reason": "PDF total differs", "invoice_total_inr": 118.0, "ai_extracted_amount": 106.2,
+               "gstin_vendor": "27X", "is_overdue": False}
+        excs = streams._detect_p2p_exceptions(inv)
+        assert excs[0]["rule"] == "release_blocked" and "PDF ≠ ERP" in excs[0]["reason"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# F8 — on-behalf-of-user reads
+# ═══════════════════════════════════════════════════════════════
+
+class TestObo:
+    def _conn(self):
+        cur = MagicMock()
+        cur.description = [("ok",)]
+        cur.fetchall.return_value = [(1,)]
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        return conn
+
+    def test_user_token_used_for_reads(self, client):
+        with patch.object(db.dbsql, "connect", return_value=self._conn()) as connect:
+            client.get("/api/data-status", headers={"x-forwarded-access-token": "user-abc"})
+            st = client.get("/api/debug/status", headers={"x-forwarded-access-token": "user-abc"}).json()
+        assert connect.call_args.kwargs["access_token"] == "user-abc"
+        assert connect.call_args.kwargs["catalog"] == CAT
+        assert st["auth_mode"] == "obo"
+
+    def test_sp_without_header(self, client):
+        with patch.object(db.dbsql, "connect", return_value=self._conn()) as connect:
+            client.get("/api/data-status")
+        assert connect.call_args.kwargs["access_token"] == "sp-token"
+        assert config.current_user_token() is None  # context cleared after the request
+
+
+# ═══════════════════════════════════════════════════════════════
+# F5 — Lakebase operational serving
+# ═══════════════════════════════════════════════════════════════
+
+class TestExceptionQueue:
+    def test_served_from_lakebase(self, client):
+        with patch.object(lakebase, "get_ap_exception_queue", return_value=[{"invoice_id": "INV000033"}]):
+            j = client.get("/api/ap/exception-queue").json()
+        assert j["source"] == "lakebase" and j["rows"][0]["invoice_id"] == "INV000033"
+
+    def test_warehouse_fallback_is_flagged(self, client):
+        with patch.object(lakebase, "get_ap_exception_queue", return_value=None), \
+             patch.object(db, "query", return_value=[{"invoice_id": "INV000033"}]):
+            j = client.get("/api/ap/exception-queue/INV000033").json()
+        assert j["source"] == "warehouse" and j["row"]["invoice_id"] == "INV000033"
+
+    def test_queue_table_identifier_quoted(self):
+        with patch.object(lakebase, "LAKEBASE_QUEUE_TABLE", "finance_ops_control_tower.ap_exception_queue"):
+            assert lakebase._queue_table_sql() == '"finance_ops_control_tower"."ap_exception_queue"'
+        with patch.object(lakebase, "LAKEBASE_QUEUE_TABLE", "x; DROP TABLE y"):
+            with pytest.raises(ValueError):
+                lakebase._queue_table_sql()
+
+    def test_debug_status_shape(self, client):
+        with patch.object(db, "query", return_value=[{"ok": 1}]):
+            st = client.get("/api/debug/status").json()
+        for k in ("demo_mode", "auth_mode", "db", "lakebase", "genie"):
+            assert k in st
+        assert "connected" in st["lakebase"] and "configured" in st["genie"]
+        assert st["genie"]["chat_route"] in ("mas", "genie", "sql_agent")

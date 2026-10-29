@@ -1,145 +1,247 @@
-"""Database module using databricks-sql-connector."""
+"""Database module using databricks-sql-connector.
+
+Reads run on behalf of the signed-in user (x-forwarded-access-token) so Unity
+Catalog row filters and column masks apply; the app service principal is used
+only when there is no request context (startup probe).
+
+Failure handling (no silent mock data):
+  - DEMO_MODE=true   → fixture metrics, flagged as demo in /api/data-status.
+  - otherwise        → retry with backoff (the warehouse may be starting), then
+                       raise WarehouseUnavailable → HTTP 503 + UI banner. The next
+                       successful query flips the status back to live.
+"""
 import os
+import time
+import datetime
 from typing import Any
 from databricks import sql as dbsql
-from backend.config import get_workspace_host, get_token, WAREHOUSE_ID, full_table
+from backend.config import (
+    get_workspace_host, get_read_token, auth_mode, WAREHOUSE_ID, CATALOG, SCHEMA,
+    DEMO_MODE, full_table,
+)
 
-# Track demo mode
-_demo_mode = False
+
+class WarehouseUnavailable(Exception):
+    """The SQL warehouse could not be reached after retries (or demo mode is on)."""
+
+
+class QueryError(Exception):
+    """The warehouse answered but rejected the statement (bad SQL, missing table, no permission)."""
+
+
+# Live-data status, surfaced via /api/data-status and /api/debug/status.
+_status: dict[str, Any] = {
+    "live": None,              # None = not probed yet, True = last query succeeded
+    "last_error": None,
+    "last_success_at": None,
+    "last_failure_at": None,
+    "last_auth_mode": None,
+}
+
+# Errors that retrying will not fix.
+_NON_RETRYABLE = (
+    "TABLE_OR_VIEW_NOT_FOUND", "UNRESOLVED_COLUMN", "PARSE_SYNTAX_ERROR",
+    "PERMISSION_DENIED", "INSUFFICIENT_PERMISSIONS", "UNRESOLVED_ROUTINE",
+    "DATATYPE_MISMATCH", "SQLSTATE: 42",
+)
+
+RETRIES = int(os.environ.get("QUERY_RETRIES", "3"))
+BACKOFF_S = float(os.environ.get("QUERY_RETRY_BACKOFF", "2"))
+
+
+def data_status() -> dict:
+    """Whether the backend is currently serving live rows."""
+    return {
+        "demo_mode": DEMO_MODE,
+        "live": False if DEMO_MODE else _status["live"],
+        "last_error": _status["last_error"],
+        "last_success_at": _status["last_success_at"],
+        "last_failure_at": _status["last_failure_at"],
+        "auth_mode": _status["last_auth_mode"],
+        "warehouse_id": WAREHOUSE_ID,
+    }
+
 
 def get_connection():
-    """Create a new Databricks SQL connection."""
+    """Create a new Databricks SQL connection (user token when available)."""
     host = get_workspace_host().replace("https://", "")
-    token = get_token()
     return dbsql.connect(
         server_hostname=host,
         http_path=f"/sql/1.0/warehouses/{WAREHOUSE_ID}",
-        access_token=token,
+        access_token=get_read_token(),
+        catalog=CATALOG,
+        schema=SCHEMA,
     )
 
 
+def _is_non_retryable(e: Exception) -> bool:
+    msg = str(e)
+    return any(tok in msg for tok in _NON_RETRYABLE)
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
 def query(sql: str, params: dict | None = None) -> list[dict[str, Any]]:
-    """Execute a SQL query and return rows as dicts. Falls back to demo mode on connection error."""
-    global _demo_mode
-    try:
-        conn = get_connection()
+    """Execute a SQL query and return rows as dicts.
+
+    Raises QueryError for statement errors and WarehouseUnavailable when the
+    warehouse cannot be reached after retries. Never returns invented data.
+    """
+    if DEMO_MODE:
+        raise WarehouseUnavailable("DEMO_MODE=true — warehouse queries disabled")
+
+    last_exc: Exception | None = None
+    for attempt in range(max(RETRIES, 1)):
         try:
-            cursor = conn.cursor()
-            cursor.execute(sql, parameters=params)
-            columns = [desc[0] for desc in cursor.description]
-            rows = cursor.fetchall()
+            conn = get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(sql, parameters=params)
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
+            _status.update(live=True, last_error=None, last_success_at=_now(),
+                           last_auth_mode=auth_mode())
             return [dict(zip(columns, row)) for row in rows]
-        finally:
-            conn.close()
-    except Exception as e:
-        print(f"Database query failed, using demo mode: {e}")
-        _demo_mode = True
-        return []
+        except Exception as e:
+            last_exc = e
+            if _is_non_retryable(e):
+                # The warehouse is up — this is a statement problem, not an outage.
+                _status.update(live=True, last_auth_mode=auth_mode())
+                raise QueryError(str(e)[:500]) from e
+            if attempt < RETRIES - 1:
+                time.sleep(BACKOFF_S * (2 ** attempt))
+
+    _status.update(live=False, last_error=str(last_exc)[:300], last_failure_at=_now())
+    print(f"Warehouse unavailable after {RETRIES} attempt(s): {last_exc}")
+    raise WarehouseUnavailable(str(last_exc)[:300])
+
+
+# ─── Demo fixtures (served ONLY when DEMO_MODE=true) ──────────
+
+def _get_p2p_demo_metrics() -> dict:
+    return {
+        "total_invoices": 142, "matched": 111, "touchless": 108, "release_blocked": 3,
+        "release_blocked_amount": 1_250_000, "two_way": 15, "amount_mismatch": 5,
+        "no_po": 4, "extraction_mismatch": 3, "exceptions": 34, "exceptions_by_type": {},
+        "overdue_count": 8, "total_amount": 47_500_000, "overdue_amount": 2_100_000,
+        "avg_aging_days": 21.5, "touchless_rate": 76.1, "demo": True,
+    }
+
+
+def _get_payment_run_demo_data() -> dict:
+    return {"total_payments": 89, "total_paid": 32_750_000, "avg_dpo": 42.3,
+            "early_payments": 12, "on_time_payments": 65, "late_payments": 12, "demo": True}
+
+
+def _get_o2c_demo_metrics() -> dict:
+    return {
+        "total_outstanding": 28_500_000, "avg_dso": 52.4, "total_invoices": 156,
+        "collected": 132, "total_collected": 76_400_000, "overdue_count": 24, "cei": 89.5,
+        "aging_buckets": [
+            {"bucket": "0-30 days", "count": 98, "amount": 14_700_000},
+            {"bucket": "31-60 days", "count": 35, "amount": 8_900_000},
+            {"bucket": "61-90 days", "count": 18, "amount": 3_200_000},
+            {"bucket": "90+ days", "count": 5, "amount": 1_700_000},
+        ],
+        "customers_at_risk": [], "demo": True,
+    }
+
+
+def _get_r2r_demo_metrics() -> dict:
+    return {"total_jes": 247, "total_lines": 1248, "total_debits": 125_400_000,
+            "total_credits": 125_400_000, "posted": 201, "pending": 46,
+            "tb_total_debit": 385_250_000, "tb_total_credit": 385_250_000,
+            "tb_imbalance": 0.0, "is_balanced": True, "trial_balance": [], "demo": True}
 
 
 # ─── P2P Queries ─────────────────────────────────────────────
 
-def _get_demo_invoices(limit: int = 200) -> list[dict]:
-    """
-    DEPRECATED: hardcoded fixtures used to mislead the UI into showing
-    "TechSupply Corp / INV001001" rows that don't exist in any table.
-    Returns an empty list so the UI shows an honest "no records yet"
-    state when the warehouse is cold, rather than fake fixture data.
-    """
-    return []
+# Touchless = clean 3-way match that the AI release control did NOT block.
+# A tampered PDF can still 3-way match on ERP data; it must not count as touchless.
+TOUCHLESS_PREDICATE = "match_status = 'THREE_WAY_MATCHED' AND NOT COALESCE(release_blocked, false)"
+
 
 def get_invoices(limit: int = 200) -> list[dict]:
-    """Get invoices for the streaming feed — ALWAYS real data from Gold."""
+    """Most recent invoices from Gold (newest first; the stream replays them oldest first)."""
     return query(f"""
         SELECT i.invoice_id, i.invoice_number, i.vendor_name, i.vendor_category,
                i.invoice_date, i.due_date, i.invoice_amount, i.tax_amount,
                i.invoice_total_inr, i.match_status, i.has_po_ref, i.is_overdue,
                i.aging_days, i.aging_bucket, i.invoice_status, i.po_id, i.gstin_vendor,
-               i.pdf_file_path, i.data_source,
-               -- AI extraction fields surfaced for the streaming row so the UI can
-               -- show extracted vs ERP side-by-side without a follow-up query.
+               i.pdf_file_path, i.data_source, i.legal_entity,
+               i.release_blocked, i.block_reason, i.ai_extracted_amount,
+               e.exception_type,
                x.extracted_vendor_name, x.extracted_total_amount, x.extracted_gstin,
                x.extracted_po_reference,
-               -- Real PO total — replaces the old `invoice_total_inr AS po_amount` lie.
                p.total_amount AS po_total_amount
         FROM {full_table('gold_fact_invoices')} i
+        LEFT JOIN {full_table('silver_invoice_exceptions')} e ON i.invoice_id = e.invoice_id
         LEFT JOIN {full_table('silver_invoice_extractions')} x ON i.invoice_id = x.invoice_id
         LEFT JOIN {full_table('silver_po_header')} p           ON i.po_id      = p.po_id
-        ORDER BY i.invoice_date DESC
-        LIMIT {limit}
-    """) or []
+        ORDER BY i.invoice_date DESC, i.invoice_id
+        LIMIT {int(limit)}
+    """)
 
-
-def _get_p2p_demo_metrics() -> dict:
-    """Return demo P2P metrics."""
-    return {
-        "total_invoices": 142,
-        "matched": 111,
-        "two_way": 15,
-        "amount_mismatch": 5,
-        "no_po": 4,
-        "extraction_mismatch": 7,
-        "exceptions": 16,
-        "overdue_count": 8,
-        "total_amount": 47_500_000,
-        "overdue_amount": 2_100_000,
-        "avg_aging_days": 21.5,
-        "touchless_rate": 78.2,
-    }
 
 def get_p2p_metrics() -> dict:
     """Get AP/P2P KPI metrics."""
-    # No demo fallback — return empty metrics if warehouse cold; UI shows "—".
+    if DEMO_MODE:
+        return _get_p2p_demo_metrics()
 
     rows = query(f"""
         SELECT
             COUNT(*) as total_invoices,
             SUM(CASE WHEN match_status = 'THREE_WAY_MATCHED' THEN 1 ELSE 0 END) as matched,
+            SUM(CASE WHEN {TOUCHLESS_PREDICATE} THEN 1 ELSE 0 END) as touchless,
+            SUM(CASE WHEN COALESCE(release_blocked, false) THEN 1 ELSE 0 END) as release_blocked,
+            SUM(CASE WHEN COALESCE(release_blocked, false) THEN invoice_total_inr ELSE 0 END) as release_blocked_amount,
             SUM(CASE WHEN match_status = 'AMOUNT_MISMATCH' THEN 1 ELSE 0 END) as amount_mismatch,
             SUM(CASE WHEN match_status = 'NO_PO_REFERENCE' THEN 1 ELSE 0 END) as no_po,
             SUM(CASE WHEN match_status = 'TWO_WAY_MATCHED' THEN 1 ELSE 0 END) as two_way,
-            SUM(CASE WHEN match_status = 'EXTRACTION_MISMATCH' THEN 1 ELSE 0 END) as extraction_mismatch,
             SUM(CASE WHEN is_overdue = true THEN 1 ELSE 0 END) as overdue_count,
             SUM(invoice_total_inr) as total_amount,
             SUM(CASE WHEN is_overdue = true THEN invoice_total_inr ELSE 0 END) as overdue_amount,
             AVG(CASE WHEN aging_days > 0 THEN aging_days END) as avg_aging_days,
-            ROUND(SUM(CASE WHEN match_status = 'THREE_WAY_MATCHED' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as touchless_rate
+            ROUND(SUM(CASE WHEN {TOUCHLESS_PREDICATE} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as touchless_rate
         FROM {full_table('gold_fact_invoices')}
     """)
-    if rows:
-        r = rows[0]
-        # Count all exception types
-        exceptions = (r.get("amount_mismatch") or 0) + (r.get("no_po") or 0) + (r.get("extraction_mismatch") or 0)
-        return {
-            "total_invoices": r.get("total_invoices", 0),
-            "matched": r.get("matched", 0),
-            "two_way": r.get("two_way", 0),
-            "amount_mismatch": r.get("amount_mismatch", 0),
-            "no_po": r.get("no_po", 0),
-            "extraction_mismatch": r.get("extraction_mismatch", 0),
-            "exceptions": exceptions,
-            "overdue_count": r.get("overdue_count", 0),
-            "total_amount": float(r.get("total_amount", 0) or 0),
-            "overdue_amount": float(r.get("overdue_amount", 0) or 0),
-            "avg_aging_days": round(float(r.get("avg_aging_days", 0) or 0), 1),
-            "touchless_rate": float(r.get("touchless_rate", 0) or 0),
-        }
-    return {}
-
-
-def _get_payment_run_demo_data() -> dict:
-    """Return demo payment run data."""
+    by_type = query(f"""
+        SELECT exception_type, COUNT(*) AS n
+        FROM {full_table('silver_invoice_exceptions')}
+        GROUP BY exception_type
+    """)
+    if not rows:
+        return {}
+    r = rows[0]
+    exc = {t["exception_type"]: int(t["n"] or 0) for t in by_type}
     return {
-        "total_payments": 89,
-        "total_paid": 32_750_000,
-        "avg_dpo": 42.3,
-        "early_payments": 12,
-        "on_time_payments": 65,
-        "late_payments": 12,
+        "total_invoices": r.get("total_invoices", 0),
+        "matched": r.get("matched", 0),
+        "touchless": r.get("touchless", 0),
+        "release_blocked": r.get("release_blocked", 0),
+        "release_blocked_amount": float(r.get("release_blocked_amount", 0) or 0),
+        "two_way": r.get("two_way", 0),
+        "amount_mismatch": r.get("amount_mismatch", 0),
+        "no_po": r.get("no_po", 0),
+        "extraction_mismatch": exc.get("EXTRACTION_MISMATCH", 0),
+        "exceptions": sum(exc.values()),
+        "exceptions_by_type": exc,
+        "overdue_count": r.get("overdue_count", 0),
+        "total_amount": float(r.get("total_amount", 0) or 0),
+        "overdue_amount": float(r.get("overdue_amount", 0) or 0),
+        "avg_aging_days": round(float(r.get("avg_aging_days", 0) or 0), 1),
+        "touchless_rate": float(r.get("touchless_rate", 0) or 0),
     }
+
 
 def get_payment_run_data() -> dict:
     """Get payment run summary."""
+    if DEMO_MODE:
+        return _get_payment_run_demo_data()
     rows = query(f"""
         SELECT
             COUNT(*) as total_payments,
@@ -165,81 +267,56 @@ def get_payment_run_data() -> dict:
 
 # ─── O2C Queries ─────────────────────────────────────────────
 
-def _get_demo_collections(limit: int = 200) -> list[dict]:
-    """Return demo collections."""
-    collections = [
-        {"o2c_invoice_id": "O2C001001", "invoice_number": "INV-2025-001", "customer_name": "Tech Corp Ltd", "segment": "Enterprise", "industry": "IT", "invoice_date": "2025-02-15", "due_date": "2025-03-15", "invoice_total_inr": 850000, "amount_collected_inr": 0, "balance_outstanding": 850000, "invoice_status": "OVERDUE", "aging_bucket": "61-90 days", "days_outstanding": 53, "days_overdue": 23, "is_fully_collected": False, "payment_method": None, "region": "North"},
-        {"o2c_invoice_id": "O2C001002", "invoice_number": "INV-2025-002", "customer_name": "Global Industries", "segment": "Mid-market", "industry": "Manufacturing", "invoice_date": "2025-01-20", "due_date": "2025-02-20", "invoice_total_inr": 1200000, "amount_collected_inr": 500000, "balance_outstanding": 700000, "invoice_status": "PARTIAL", "aging_bucket": "90+ days", "days_outstanding": 76, "days_overdue": 45, "is_fully_collected": False, "payment_method": "Bank Transfer", "region": "South"},
-        {"o2c_invoice_id": "O2C001003", "invoice_number": "INV-2025-003", "customer_name": "Express Logistics", "segment": "SMB", "industry": "Transportation", "invoice_date": "2025-02-25", "due_date": "2025-03-25", "invoice_total_inr": 425000, "amount_collected_inr": 425000, "balance_outstanding": 0, "invoice_status": "COLLECTED", "aging_bucket": "0-30 days", "days_outstanding": 13, "days_overdue": 0, "is_fully_collected": True, "payment_method": "Credit Card", "region": "East"},
-        {"o2c_invoice_id": "O2C001004", "invoice_number": "INV-2025-004", "customer_name": "Retail Partners", "segment": "SMB", "industry": "Retail", "invoice_date": "2025-02-28", "due_date": "2025-03-28", "invoice_total_inr": 580000, "amount_collected_inr": 580000, "balance_outstanding": 0, "invoice_status": "COLLECTED", "aging_bucket": "0-30 days", "days_outstanding": 10, "days_overdue": 0, "is_fully_collected": True, "payment_method": "ACH", "region": "West"},
-        {"o2c_invoice_id": "O2C001005", "invoice_number": "INV-2025-005", "customer_name": "Healthcare Group", "segment": "Enterprise", "industry": "Healthcare", "invoice_date": "2025-03-01", "due_date": "2025-04-01", "invoice_total_inr": 950000, "amount_collected_inr": 0, "balance_outstanding": 950000, "invoice_status": "PENDING", "aging_bucket": "0-30 days", "days_outstanding": 7, "days_overdue": 0, "is_fully_collected": False, "payment_method": None, "region": "North"},
-    ]
-    return collections[:limit]
-
 def get_collections(limit: int = 200) -> list[dict]:
-    """Get collections for streaming feed."""
+    """Most recent customer invoices for the collections replay.
 
+    auto_matched is derived from data: a cleared receipt exists in
+    bronze_o2c_payments for the same invoice and for the invoice amount (±₹1).
+    """
     return query(f"""
-        SELECT o2c_invoice_id, invoice_number, customer_name, segment,
-               industry, invoice_date, due_date, invoice_total_inr,
-               amount_collected_inr, balance_outstanding, invoice_status,
-               aging_bucket, days_outstanding, days_overdue, is_fully_collected,
-               payment_method, region
-        FROM {full_table('gold_fact_collections')}
-        ORDER BY days_outstanding DESC
-        LIMIT {limit}
-    """) or []
+        WITH c AS (
+            SELECT o2c_invoice_id, invoice_number, customer_id, customer_name, segment,
+                   industry, invoice_date, due_date, invoice_total_inr,
+                   amount_collected_inr, balance_outstanding, invoice_status,
+                   aging_bucket, days_outstanding, days_overdue, is_fully_collected,
+                   payment_method, region, legal_entity
+            FROM {full_table('gold_fact_collections')}
+        ),
+        m AS (
+            SELECT p.o2c_invoice_id,
+                   MAX(CASE WHEN ABS(p.payment_amount - c.invoice_total_inr) <= 1 THEN 1 ELSE 0 END) = 1 AS auto_matched
+            FROM {full_table('bronze_o2c_payments')} p
+            JOIN c ON p.o2c_invoice_id = c.o2c_invoice_id
+            GROUP BY p.o2c_invoice_id
+        )
+        SELECT c.*, COALESCE(m.auto_matched, false) AS auto_matched
+        FROM c LEFT JOIN m ON c.o2c_invoice_id = m.o2c_invoice_id
+        ORDER BY c.invoice_date DESC, c.o2c_invoice_id
+        LIMIT {int(limit)}
+    """)
 
-
-def _get_o2c_demo_metrics() -> dict:
-    """Return demo O2C metrics."""
-    return {
-        "total_outstanding": 28_500_000,
-        "avg_dso": 38.2,
-        "total_invoices": 156,
-        "collected": 132,
-        "total_collected": 76_400_000,
-        "overdue_count": 24,
-        "cei": 89.5,
-        "aging_buckets": [
-            {"bucket": "0-30 days", "count": 98, "amount": 14_700_000},
-            {"bucket": "31-60 days", "count": 35, "amount": 8_900_000},
-            {"bucket": "61-90 days", "count": 18, "amount": 3_200_000},
-            {"bucket": "90+ days", "count": 5, "amount": 1_700_000},
-        ],
-        "customers_at_risk": [
-            {"name": "Tech Corp Ltd", "credit_limit": 5_000_000, "outstanding": 4_200_000, "utilization": 84.0, "overdue": 3, "dso": 45.2},
-            {"name": "Global Industries", "credit_limit": 3_000_000, "outstanding": 2_850_000, "utilization": 95.0, "overdue": 7, "dso": 62.1},
-            {"name": "Express Logistics", "credit_limit": 2_000_000, "outstanding": 1_950_000, "utilization": 97.5, "overdue": 2, "dso": 38.5},
-        ],
-    }
 
 def get_o2c_metrics() -> dict:
     """Get AR/O2C KPI metrics."""
-    # No demo fallback — return empty metrics if warehouse cold; UI shows "—".
+    if DEMO_MODE:
+        return _get_o2c_demo_metrics()
 
-    # Aging breakdown
     aging = query(f"""
-        SELECT
-            aging_bucket,
-            COUNT(*) as count,
-            SUM(balance_outstanding) as amount
+        SELECT aging_bucket, COUNT(*) as count, SUM(balance_outstanding) as amount
         FROM {full_table('gold_fact_collections')}
+        WHERE balance_outstanding > 0
         GROUP BY aging_bucket
         ORDER BY
             CASE aging_bucket
-                WHEN '0-30 days' THEN 1
-                WHEN '31-60 days' THEN 2
-                WHEN '61-90 days' THEN 3
-                WHEN '90+ days' THEN 4
-                ELSE 5
+                WHEN '0-30 days' THEN 1 WHEN '31-60 days' THEN 2
+                WHEN '61-90 days' THEN 3 WHEN '90+ days' THEN 4 ELSE 5
             END
     """)
 
     totals = query(f"""
         SELECT
             SUM(balance_outstanding) as total_outstanding,
-            AVG(days_outstanding) as avg_dso,
+            AVG(CASE WHEN balance_outstanding > 0 THEN days_outstanding END) as avg_dso,
             COUNT(*) as total_invoices,
             SUM(CASE WHEN is_fully_collected = true THEN 1 ELSE 0 END) as collected,
             SUM(amount_collected_inr) as total_collected,
@@ -257,8 +334,10 @@ def get_o2c_metrics() -> dict:
         LIMIT 10
     """)
 
-    t = totals[0] if totals else {}
-    total_billed = float(t.get("total_billed", 1) or 1)
+    if not totals:
+        return {}
+    t = totals[0]
+    total_billed = float(t.get("total_billed", 0) or 0)
     total_collected = float(t.get("total_collected", 0) or 0)
     cei = round((total_collected / total_billed) * 100, 1) if total_billed else 0
 
@@ -285,26 +364,13 @@ def get_o2c_metrics() -> dict:
             }
             for c in customers_at_risk
         ],
-    } if aging and totals else {}
+    }
 
 
 # ─── R2R Queries ─────────────────────────────────────────────
 
-def _get_demo_journal_entries(limit: int = 200) -> list[dict]:
-    """Return demo journal entries."""
-    entries = [
-        {"je_id": "JE001", "je_number": "JE-2025-001", "gl_line_number": 1, "account_code": "1200", "account_name": "Accounts Receivable", "account_type": "Asset", "cost_center_name": "Sales", "department": "Revenue", "je_date": "2025-03-05", "period": "2025-03", "je_type": "Revenue", "status": "POSTED", "posted_by": "Vikram", "debit_inr": 850000, "credit_inr": 0, "net_amount_inr": 850000, "gl_description": "Sales invoice INV-2025-001 to Tech Corp Ltd"},
-        {"je_id": "JE001", "je_number": "JE-2025-001", "gl_line_number": 2, "account_code": "4100", "account_name": "Revenue", "account_type": "Revenue", "cost_center_name": "Sales", "department": "Revenue", "je_date": "2025-03-05", "period": "2025-03", "je_type": "Revenue", "status": "POSTED", "posted_by": "Vikram", "debit_inr": 0, "credit_inr": 850000, "net_amount_inr": -850000, "gl_description": "Sales invoice INV-2025-001 to Tech Corp Ltd"},
-        {"je_id": "JE002", "je_number": "JE-2025-002", "gl_line_number": 1, "account_code": "1100", "account_name": "Cash", "account_type": "Asset", "cost_center_name": "Treasury", "department": "Finance", "je_date": "2025-03-04", "period": "2025-03", "je_type": "Payment", "status": "POSTED", "posted_by": "Vikram", "debit_inr": 500000, "credit_inr": 0, "net_amount_inr": 500000, "gl_description": "Payment received from Global Industries"},
-        {"je_id": "JE002", "je_number": "JE-2025-002", "gl_line_number": 2, "account_code": "1200", "account_name": "Accounts Receivable", "account_type": "Asset", "cost_center_name": "Treasury", "department": "Finance", "je_date": "2025-03-04", "period": "2025-03", "je_type": "Payment", "status": "POSTED", "posted_by": "Vikram", "debit_inr": 0, "credit_inr": 500000, "net_amount_inr": -500000, "gl_description": "Payment received from Global Industries"},
-        {"je_id": "JE003", "je_number": "JE-2025-003", "gl_line_number": 1, "account_code": "5100", "account_name": "COGS", "account_type": "Expense", "cost_center_name": "Operations", "department": "Cost Center", "je_date": "2025-03-01", "period": "2025-03", "je_type": "Accrual", "status": "PENDING", "posted_by": "Akash", "debit_inr": 125000, "credit_inr": 0, "net_amount_inr": 125000, "gl_description": "Monthly accrual for raw materials"},
-        {"je_id": "JE003", "je_number": "JE-2025-003", "gl_line_number": 2, "account_code": "2100", "account_name": "Accounts Payable", "account_type": "Liability", "cost_center_name": "Operations", "department": "Cost Center", "je_date": "2025-03-01", "period": "2025-03", "je_type": "Accrual", "status": "PENDING", "posted_by": "Akash", "debit_inr": 0, "credit_inr": 125000, "net_amount_inr": -125000, "gl_description": "Monthly accrual for raw materials"},
-    ]
-    return entries[:limit]
-
 def get_journal_entries(limit: int = 200) -> list[dict]:
-    """Get journal entries for streaming feed."""
-
+    """Most recent GL lines (newest first; the stream replays them oldest first)."""
     return query(f"""
         SELECT je_id, je_number, gl_line_number, account_code, account_name,
                account_type, cost_center_name, department, je_date, period,
@@ -312,83 +378,74 @@ def get_journal_entries(limit: int = 200) -> list[dict]:
                net_amount_inr, gl_description
         FROM {full_table('gold_fact_gl')}
         ORDER BY je_date DESC, je_id, gl_line_number
-        LIMIT {limit}
-    """) or []
+        LIMIT {int(limit)}
+    """)
 
 
-def _get_r2r_demo_metrics() -> dict:
-    """Return demo R2R metrics."""
-    return {
-        "total_jes": 247,
-        "total_lines": 1248,
-        "total_debits": 125_400_000,
-        "total_credits": 125_400_000,
-        "posted": 201,
-        "pending": 46,
-        "tb_total_debit": 385_250_000,
-        "tb_total_credit": 385_250_000,
-        "tb_imbalance": 0.0,
-        "is_balanced": True,
-        "trial_balance": [
-            {"account_code": "1100", "account_name": "Cash", "account_type": "Asset", "debit": 8_500_000, "credit": 0, "balance": 8_500_000, "balance_type": "Debit", "transactions": 342},
-            {"account_code": "1200", "account_name": "Accounts Receivable", "account_type": "Asset", "debit": 28_500_000, "credit": 0, "balance": 28_500_000, "balance_type": "Debit", "transactions": 156},
-            {"account_code": "1500", "account_name": "Fixed Assets", "account_type": "Asset", "debit": 120_000_000, "credit": 0, "balance": 120_000_000, "balance_type": "Debit", "transactions": 8},
-            {"account_code": "2100", "account_name": "Accounts Payable", "account_type": "Liability", "debit": 0, "credit": 14_700_000, "balance": 14_700_000, "balance_type": "Credit", "transactions": 142},
-            {"account_code": "2500", "account_name": "Loan Payable", "account_type": "Liability", "debit": 0, "credit": 50_000_000, "balance": 50_000_000, "balance_type": "Credit", "transactions": 12},
-            {"account_code": "3100", "account_name": "Capital Stock", "account_type": "Equity", "debit": 0, "credit": 200_000_000, "balance": 200_000_000, "balance_type": "Credit", "transactions": 2},
-            {"account_code": "4100", "account_name": "Revenue", "account_type": "Revenue", "debit": 0, "credit": 125_400_000, "balance": 125_400_000, "balance_type": "Credit", "transactions": 156},
-            {"account_code": "5100", "account_name": "COGS", "account_type": "Expense", "debit": 75_000_000, "credit": 0, "balance": 75_000_000, "balance_type": "Debit", "transactions": 142},
-            {"account_code": "5500", "account_name": "Operating Expenses", "account_type": "Expense", "debit": 24_550_000, "credit": 0, "balance": 24_550_000, "balance_type": "Debit", "transactions": 247},
-        ],
-    }
+def shape_recon(rows: list[dict], items: list[dict]) -> dict:
+    """Shape gold_recon_* rows for the UI.
 
-def get_subledger_gl_recon() -> list[dict]:
+    'Tied' is shown only when the UNEXPLAINED delta is zero (|Δ| < ₹1): the GL may
+    legitimately differ from the sub-ledger by documented reconciling items.
     """
-    Sub-ledger ↔ GL trial balance reconciliation.
-    Reads gold_recon_subledger_vs_gl which is the canonical loop-closure proof:
-      - AR sub-ledger total ↔ GL acct 1100 closing balance
-      - AP sub-ledger total ↔ GL acct 2000 closing balance
-    Returns one row per reconciled account with delta + tied flag.
-    """
-    if _demo_mode:
-        return [
-            {"account_code": "1100", "account_name": "Accounts Receivable",
-             "balance_type": "DR", "subledger_amount": 28_500_000.0,
-             "gl_amount": 28_500_000.0, "delta": 0.0, "tied": True,
-             "subledger_source_table": "gold_fact_collections",
-             "subledger_metric": "SUM(balance_outstanding)"},
-            {"account_code": "2000", "account_name": "Accounts Payable",
-             "balance_type": "CR", "subledger_amount": 14_700_000.0,
-             "gl_amount": 14_700_000.0, "delta": 0.0, "tied": True,
-             "subledger_source_table": "gold_fact_invoices",
-             "subledger_metric": "SUM(invoice_total_inr - paid_amount_inr) WHERE invoice_status != 'PAID'"},
-        ]
+    by_acct: dict[str, list[dict]] = {}
+    for it in items or []:
+        by_acct.setdefault(str(it.get("account_code")), []).append({
+            "document_id": it.get("document_id"),
+            "document_type": it.get("document_type"),
+            "amount": float(it.get("amount") or 0),
+            "reason": it.get("reason"),
+            "gl_je_id": it.get("gl_je_id"),
+            "gl_je_status": it.get("gl_je_status"),
+        })
+
+    out = []
+    for r in rows or []:
+        sub = float(r.get("subledger_amount") or 0)
+        gl = float(r.get("gl_amount") or 0)
+        delta = float(r["delta"]) if r.get("delta") is not None else sub - gl
+        explained = float(r.get("reconciling_items_amount") or 0)
+        unexplained = (float(r["unexplained_delta"]) if r.get("unexplained_delta") is not None
+                       else delta - explained)
+        acct = str(r.get("account_code"))
+        out.append({
+            "account_code": acct,
+            "account_name": r.get("account_name"),
+            "subledger_source": r.get("subledger_source"),
+            "subledger_amount": sub,
+            "gl_amount": gl,
+            "delta": delta,
+            "reconciling_items_amount": explained,
+            "reconciling_items_count": int(r.get("reconciling_items_count") or len(by_acct.get(acct, []))),
+            "unexplained_delta": unexplained,
+            # Never trust a stored flag over the arithmetic.
+            "tied": abs(unexplained) < 1.0,
+            "cutoff_date": str(r.get("cutoff_date")) if r.get("cutoff_date") is not None else None,
+            "items": by_acct.get(acct, []),
+        })
+    return {"rows": out, "all_tied": bool(out) and all(x["tied"] for x in out)}
+
+
+def get_subledger_gl_recon() -> dict:
+    """Sub-ledger ↔ GL reconciliation with the documented reconciling items."""
     rows = query(f"""
-        SELECT account_code, account_name, balance_type,
-               subledger_source_table, subledger_metric,
-               subledger_amount, gl_amount, delta, tied
+        SELECT account_code, account_name, subledger_source, subledger_amount, gl_amount,
+               delta, reconciling_items_amount, reconciling_items_count,
+               unexplained_delta, tied, cutoff_date
         FROM {full_table('gold_recon_subledger_vs_gl')}
         ORDER BY account_code
     """)
-    return [
-        {
-            "account_code": r["account_code"],
-            "account_name": r["account_name"],
-            "balance_type": r["balance_type"],
-            "subledger_amount": float(r["subledger_amount"] or 0),
-            "gl_amount": float(r["gl_amount"] or 0),
-            "delta": float(r["delta"] or 0),
-            "tied": bool(r["tied"]),
-            "subledger_source_table": r["subledger_source_table"],
-            "subledger_metric": r["subledger_metric"],
-        }
-        for r in (rows or [])
-    ]
+    items = query(f"""
+        SELECT account_code, document_id, document_type, amount, reason, gl_je_id, gl_je_status
+        FROM {full_table('gold_recon_reconciling_items')}
+        ORDER BY account_code, document_id
+    """)
+    return shape_recon(rows, items)
 
 
 def get_r2r_metrics() -> dict:
     """Get GL/R2R KPI metrics."""
-    if _demo_mode:
+    if DEMO_MODE:
         return _get_r2r_demo_metrics()
 
     je_stats = query(f"""
@@ -398,31 +455,39 @@ def get_r2r_metrics() -> dict:
             SUM(debit_inr) as total_debits,
             SUM(credit_inr) as total_credits,
             COUNT(DISTINCT CASE WHEN status = 'POSTED' THEN je_id END) as posted,
-            COUNT(DISTINCT CASE WHEN status = 'PENDING' THEN je_id END) as pending,
-            COUNT(DISTINCT je_type) as je_types
+            COUNT(DISTINCT CASE WHEN status = 'PENDING' THEN je_id END) as pending
         FROM {full_table('gold_fact_gl')}
     """)
+
+    latest = f"""(fiscal_year, period) = (
+        SELECT fiscal_year, period FROM {full_table('gold_fact_trial_balance')}
+        ORDER BY fiscal_year DESC, period DESC LIMIT 1)"""
 
     trial_balance = query(f"""
         SELECT account_code, account_name, account_type, account_subtype,
                closing_balance_inr, balance_type, period_debit, period_credit,
                period_net, transaction_count
         FROM {full_table('gold_fact_trial_balance')}
-        WHERE period = (SELECT MAX(period) FROM {full_table('gold_fact_trial_balance')})
+        WHERE {latest}
         ORDER BY account_code
     """)
 
+    # A trial balance balances when Σ DR closing balances = Σ CR closing balances.
     tb_totals = query(f"""
         SELECT
-            SUM(period_debit) as total_debit,
-            SUM(period_credit) as total_credit,
-            ABS(SUM(period_debit) - SUM(period_credit)) as imbalance
+            SUM(CASE WHEN balance_type = 'DR' THEN closing_balance_inr ELSE 0 END) as total_debit,
+            SUM(CASE WHEN balance_type = 'CR' THEN closing_balance_inr ELSE 0 END) as total_credit
         FROM {full_table('gold_fact_trial_balance')}
-        WHERE period = (SELECT MAX(period) FROM {full_table('gold_fact_trial_balance')})
+        WHERE {latest}
     """)
 
-    j = je_stats[0] if je_stats else {}
+    if not je_stats or not trial_balance:
+        return {}
+    j = je_stats[0]
     tb = tb_totals[0] if tb_totals else {}
+    tb_dr = float(tb.get("total_debit", 0) or 0)
+    tb_cr = float(tb.get("total_credit", 0) or 0)
+    imbalance = abs(tb_dr - tb_cr)
 
     return {
         "total_jes": j.get("total_jes", 0),
@@ -431,10 +496,10 @@ def get_r2r_metrics() -> dict:
         "total_credits": float(j.get("total_credits", 0) or 0),
         "posted": j.get("posted", 0),
         "pending": j.get("pending", 0),
-        "tb_total_debit": float(tb.get("total_debit", 0) or 0),
-        "tb_total_credit": float(tb.get("total_credit", 0) or 0),
-        "tb_imbalance": float(tb.get("imbalance", 0) or 0),
-        "is_balanced": float(tb.get("imbalance", 999) or 0) < 1.0,
+        "tb_total_debit": tb_dr,
+        "tb_total_credit": tb_cr,
+        "tb_imbalance": imbalance,
+        "is_balanced": imbalance < 1.0,
         "trial_balance": [
             {
                 "account_code": r["account_code"],
@@ -448,4 +513,21 @@ def get_r2r_metrics() -> dict:
             }
             for r in trial_balance
         ],
-    } if je_stats and trial_balance else {}
+    }
+
+
+def get_ap_exception_queue_from_warehouse(limit: int = 200, invoice_id: str | None = None) -> list[dict]:
+    """Warehouse fallback for the AP exception queue (same shape as the Lakebase synced table)."""
+    where = "WHERE i.invoice_id = %(invoice_id)s" if invoice_id else \
+            "WHERE e.exception_type IS NOT NULL OR COALESCE(i.release_blocked, false)"
+    return query(f"""
+        SELECT i.invoice_id, i.invoice_number, i.vendor_id, i.vendor_name, i.legal_entity,
+               i.invoice_date, i.due_date, i.invoice_total_inr, i.match_status,
+               COALESCE(e.exception_type, CASE WHEN i.release_blocked THEN 'EXTRACTION_MISMATCH' END) AS exception_type,
+               i.release_blocked, i.block_reason, i.ai_extracted_amount, i.pdf_file_path, i.aging_days
+        FROM {full_table('gold_fact_invoices')} i
+        LEFT JOIN {full_table('silver_invoice_exceptions')} e ON i.invoice_id = e.invoice_id
+        {where}
+        ORDER BY COALESCE(i.release_blocked, false) DESC, i.invoice_total_inr DESC
+        LIMIT {int(limit)}
+    """, {"invoice_id": invoice_id} if invoice_id else None)

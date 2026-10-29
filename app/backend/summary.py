@@ -11,12 +11,13 @@ in a single glance.
 from __future__ import annotations
 
 import json
+import os
 import aiohttp
 
 from backend import db
 from backend.config import get_workspace_host, get_token, CATALOG, SCHEMA
 
-LLM_ENDPOINT = "databricks-claude-sonnet-4-6"
+LLM_ENDPOINT = os.environ.get("FMAPI_MODEL", "databricks-claude-sonnet-4-5")
 
 
 # ─── Per-tab signal queries ──────────────────────────────────────────────────
@@ -47,7 +48,8 @@ top_amt_mismatch AS (
 )
 SELECT
   (SELECT COUNT(*) FROM inv) AS total_invoices,
-  (SELECT COUNT(*) FROM inv WHERE match_status = 'THREE_WAY_MATCHED') AS touchless,
+  (SELECT COUNT(*) FROM inv WHERE match_status = 'THREE_WAY_MATCHED' AND NOT COALESCE(release_blocked, false)) AS touchless,
+  (SELECT COUNT(*) FROM inv WHERE COALESCE(release_blocked, false)) AS release_blocked,
   (SELECT COUNT(*) FROM inv WHERE is_overdue) AS overdue_count,
   (SELECT ROUND(SUM(invoice_total_inr)/1e7, 2) FROM inv WHERE is_overdue) AS overdue_value_cr,
   (SELECT to_json(collect_list(named_struct('type', exception_type, 'count', n))) FROM ex) AS exceptions_json,

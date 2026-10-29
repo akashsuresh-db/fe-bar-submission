@@ -1,7 +1,13 @@
-"""SSE stream generators for real-time finance event feeds."""
+"""SSE stream generators for the finance event feeds.
+
+The feeds are a REPLAY of governed Gold rows in posting-date order (oldest of the
+most recent N first) — not live ERP events. Every flag shown (match status,
+release block, auto-matched receipt) comes from the data; `random` is used only
+for cosmetic pacing between events.
+"""
 import asyncio
 import json
-import random
+import random  # cosmetic timing jitter only
 from typing import AsyncGenerator
 from backend import db
 
@@ -22,16 +28,31 @@ def _serialize_row(row: dict) -> dict:
 
 # ─── Exception detection logic ────────────────────────────────
 
+def _is_true(v) -> bool:
+    return str(v).lower() == "true" or v is True
+
+
 def _detect_p2p_exceptions(inv: dict) -> list[dict]:
     """Detect AP exceptions for an invoice."""
     exceptions = []
     ms = str(inv.get("match_status", ""))
+    if _is_true(inv.get("release_blocked")):
+        erp = float(inv.get("invoice_total_inr", 0) or 0)
+        pdf = inv.get("ai_extracted_amount")
+        detail = f" (PDF INR {float(pdf):,.0f} vs ERP INR {erp:,.0f})" if pdf is not None else ""
+        exceptions.append({
+            "type": "quarantine",
+            "rule": "release_blocked",
+            "severity": "critical",
+            "reason": f"Blocked: PDF ≠ ERP — {inv.get('block_reason') or 'AI extraction disagrees with the ERP record'}{detail}",
+            "resolution": "Payment release blocked. Confirm the invoice with the vendor before releasing.",
+        })
     if ms == "AMOUNT_MISMATCH":
         exceptions.append({
             "type": "quarantine",
             "rule": "amount_match",
             "severity": "high",
-            "reason": f"Invoice amount does not match PO amount (variance exceeds 2% threshold)",
+            "reason": "Invoice amount does not match PO amount (variance exceeds 5% threshold)",
             "resolution": "Compare invoice line items against PO {po}. Contact vendor if discrepancy confirmed.".format(
                 po=inv.get("po_id", "N/A")
             ),
@@ -135,14 +156,24 @@ def _detect_r2r_exceptions(je: dict, je_lines: list[dict]) -> list[dict]:
 
 # ─── SSE Generators ────────────────────────────────────────────
 
+def _unavailable(e: Exception) -> str:
+    return json.dumps({"type": "error", "data": {
+        "error": "warehouse_unavailable" if isinstance(e, db.WarehouseUnavailable) else "query_error",
+        "message": str(e)[:300]}})
+
+
 async def stream_p2p() -> AsyncGenerator[str, None]:
-    """Stream P2P invoice events."""
-    invoices = await asyncio.to_thread(db.get_invoices, 100)
-    random.shuffle(invoices)
+    """Replay the latest 100 AP invoices in invoice-date order."""
+    try:
+        invoices = await asyncio.to_thread(db.get_invoices, 100)
+    except Exception as e:
+        yield _unavailable(e)
+        return
+    invoices = list(reversed(invoices))  # oldest → newest
 
     # Morning greeting
     total = len(invoices)
-    exceptions_count = sum(1 for i in invoices if i.get("match_status") in ("AMOUNT_MISMATCH", "NO_PO_REFERENCE"))
+    exceptions_count = sum(1 for i in invoices if i.get("exception_type") or _is_true(i.get("release_blocked")))
     overdue_count = sum(1 for i in invoices if str(i.get("is_overdue", "")).lower() == "true")
     total_amount = sum(float(i.get("invoice_total_inr", 0) or 0) for i in invoices)
 
@@ -165,7 +196,7 @@ async def stream_p2p() -> AsyncGenerator[str, None]:
 
         # Simulate match status animation
         ms = inv.get("match_status", "")
-        if ms == "THREE_WAY_MATCHED":
+        if ms == "THREE_WAY_MATCHED" and not _is_true(inv.get("release_blocked")):
             # Show running then matched
             row["_anim_status"] = "running"
             yield json.dumps({"type": "invoice_processing", "data": row})
@@ -208,9 +239,13 @@ async def stream_p2p() -> AsyncGenerator[str, None]:
 
 
 async def stream_o2c() -> AsyncGenerator[str, None]:
-    """Stream O2C collection events."""
-    collections = await asyncio.to_thread(db.get_collections, 100)
-    random.shuffle(collections)
+    """Replay the latest 100 customer invoices in invoice-date order."""
+    try:
+        collections = await asyncio.to_thread(db.get_collections, 100)
+    except Exception as e:
+        yield _unavailable(e)
+        return
+    collections = list(reversed(collections))  # oldest → newest
 
     total_outstanding = sum(float(c.get("balance_outstanding", 0) or 0) for c in collections)
     overdue = [c for c in collections if int(c.get("days_overdue", 0) or 0) > 0]
@@ -240,12 +275,12 @@ async def stream_o2c() -> AsyncGenerator[str, None]:
         row = _serialize_row(col)
 
         # Simulate payment events
-        status = col.get("invoice_status", "")
         collected = float(col.get("amount_collected_inr", 0) or 0)
-        if status in ("COLLECTED", "PARTIALLY_COLLECTED") and collected > 0:
+        if collected > 0:
+            # auto_matched comes from the data: a receipt for the same invoice and amount exists.
             yield json.dumps({"type": "payment_received", "data": {
                 **row, "event": "cash_applied",
-                "auto_matched": random.random() > 0.3,
+                "auto_matched": _is_true(col.get("auto_matched")),
             }})
             collected_today += collected
         else:
@@ -285,8 +320,12 @@ async def stream_o2c() -> AsyncGenerator[str, None]:
 
 
 async def stream_r2r() -> AsyncGenerator[str, None]:
-    """Stream R2R journal entry events."""
-    entries = await asyncio.to_thread(db.get_journal_entries, 200)
+    """Replay the latest journal entries in posting-date order."""
+    try:
+        entries = await asyncio.to_thread(db.get_journal_entries, 200)
+    except Exception as e:
+        yield _unavailable(e)
+        return
 
     # Group by je_id to process complete journal entries
     je_groups: dict[str, list[dict]] = {}
@@ -296,8 +335,10 @@ async def stream_r2r() -> AsyncGenerator[str, None]:
             je_groups[jid] = []
         je_groups[jid].append(e)
 
-    je_list = list(je_groups.items())
-    random.shuffle(je_list)
+    # Oldest → newest by posting date
+    je_list = sorted(je_groups.items(), key=lambda kv: (str(kv[1][0].get("je_date", "")), kv[0]))
+    periods = sorted({str(e.get("period") or "") for e in entries if e.get("period")})
+    close_period = periods[-1] if periods else "current period"
 
     total_jes = len(je_list)
     # Close checklist items
@@ -317,7 +358,7 @@ async def stream_r2r() -> AsyncGenerator[str, None]:
         "data": {
             "persona": "",
             "role": "GL Accountant",
-            "message": f"Month-End Close: March 2025\nDay 2 of 5  |  Status: ON TRACK\n\n{total_jes} journal entries to validate\nClose checklist: 2 of {len(checklist)} tasks complete",
+            "message": f"Month-End Close: {close_period}\n\n{total_jes} journal entries to validate (replay of posted GL lines)\nClose checklist (illustrative): 2 of {len(checklist)} tasks complete",
             "checklist": checklist,
         }
     })
@@ -328,7 +369,7 @@ async def stream_r2r() -> AsyncGenerator[str, None]:
     running_debit = 0.0
     running_credit = 0.0
 
-    for je_id, lines in je_list[:60]:  # Limit to 60 JEs for reasonable stream
+    for je_id, lines in je_list[-60:]:  # Limit to 60 JEs for reasonable stream
         first = lines[0]
         total_debit = sum(float(l.get("debit_inr", 0) or 0) for l in lines)
         total_credit = sum(float(l.get("credit_inr", 0) or 0) for l in lines)

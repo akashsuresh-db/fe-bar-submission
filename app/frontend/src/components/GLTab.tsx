@@ -17,7 +17,7 @@ import GLReconCard from "./GLReconCard";
 // Keeps the demo focused: AR, Inventory, PPE, AP, LT Debt, Retained Earnings,
 // Service Revenue, Salaries, IT Expense — one per major TB section.
 const DEMO_ACCOUNTS = new Set(["1100", "1200", "1500", "2000", "2500", "3100", "4100", "5100", "5500"]);
-import { inr, formatNum } from "../utils";
+import { inr, formatNum, dash } from "../utils";
 
 type R2RMetrics = {
   metrics: {
@@ -75,21 +75,19 @@ export default function GLTab({ userName = "User" }: Props) {
       <GLReconCard />
 
       {/* KPI Strip */}
-      {m && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <MetricCard label="Journal Entries" value={formatNum(m.total_jes)} icon={<BookOpen className="w-4 h-4" />} />
-          <MetricCard label="Posted" value={formatNum(m.posted)} color="text-db-green" icon={<CheckCircle2 className="w-4 h-4" />} />
-          <MetricCard label="Pending" value={formatNum(m.pending)} color="text-db-amber" icon={<ClipboardCheck className="w-4 h-4" />} />
-          <MetricCard label="TB Debits" value={inr(m.tb_total_debit)} color="text-text-primary" />
-          <MetricCard label="TB Credits" value={inr(m.tb_total_credit)} color="text-text-primary" />
-          <MetricCard
-            label="TB Status"
-            value={m.is_balanced ? "BALANCED" : "IMBALANCED"}
-            color={m.is_balanced ? "text-db-green" : "text-db-red"}
-            icon={<Scale className="w-4 h-4" />}
-          />
-        </div>
-      )}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <MetricCard label="Journal Entries" value={dash(m?.total_jes, formatNum)} icon={<BookOpen className="w-4 h-4" />} />
+        <MetricCard label="Posted" value={dash(m?.posted, formatNum)} color="text-db-green" icon={<CheckCircle2 className="w-4 h-4" />} />
+        <MetricCard label="Pending" value={dash(m?.pending, formatNum)} color="text-db-amber" icon={<ClipboardCheck className="w-4 h-4" />} />
+        <MetricCard label="TB Debits" value={dash(m?.tb_total_debit, inr)} color="text-text-primary" />
+        <MetricCard label="TB Credits" value={dash(m?.tb_total_credit, inr)} color="text-text-primary" />
+        <MetricCard
+          label="TB Status"
+          value={dash(m?.is_balanced, (b) => (b ? "BALANCED" : "IMBALANCED"))}
+          color={!m ? "text-text-muted" : m.is_balanced ? "text-db-green" : "text-db-red"}
+          icon={<Scale className="w-4 h-4" />}
+        />
+      </div>
 
       {/* Controls */}
       <div className="flex items-center gap-3">

@@ -1,28 +1,43 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { CheckCircle2, AlertTriangle, ArrowLeftRight, RefreshCw } from "lucide-react";
+import { CheckCircle2, AlertTriangle, ArrowLeftRight, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { inr } from "../utils";
+
+type ReconItem = {
+  document_id: string;
+  document_type: string;
+  amount: number;
+  reason: string;
+  gl_je_id: string | null;
+  gl_je_status: string | null;
+};
 
 type ReconRow = {
   account_code: string;
   account_name: string;
-  balance_type: "DR" | "CR";
+  subledger_source: string | null;
   subledger_amount: number;
   gl_amount: number;
   delta: number;
+  reconciling_items_amount: number;
+  reconciling_items_count: number;
+  unexplained_delta: number;
   tied: boolean;
-  subledger_source_table: string;
-  subledger_metric: string;
+  cutoff_date: string | null;
+  items: ReconItem[];
 };
 
 /**
- * Single-glance proof that the AP/AR sub-ledger reconciles to the GL trial balance.
- * Hits /api/recon. Green row = tied (Δ < ₹1). Red row = broken loop, render the delta.
+ * Sub-ledger ↔ GL reconciliation at the GL cut-off (/api/recon).
+ * Three numbers per control account: sub-ledger, GL, and the documented
+ * reconciling items that explain the difference. "Tied" is shown only when the
+ * UNEXPLAINED delta is zero (|Δ| < ₹1).
  */
 export default function GLReconCard() {
   const [rows, setRows] = useState<ReconRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState<Record<string, boolean>>({});
 
   async function load() {
     setLoading(true);
@@ -30,7 +45,9 @@ export default function GLReconCard() {
     try {
       const r = await fetch("/api/recon");
       if (!r.ok) {
-        setErr(`HTTP ${r.status}`);
+        const j = await r.json().catch(() => ({}));
+        setErr(j.message || j.error || `HTTP ${r.status}`);
+        setRows(null);
         return;
       }
       const j = await r.json();
@@ -46,21 +63,20 @@ export default function GLReconCard() {
     load();
   }, []);
 
-  const allTied = rows && rows.length > 0 && rows.every((r) => r.tied);
+  const allTied = !!rows && rows.length > 0 && rows.every((r) => Math.abs(r.unexplained_delta) < 1);
+  const totalItems = rows?.reduce((n, r) => n + (r.reconciling_items_count || 0), 0) ?? 0;
+  const cutoff = rows?.find((r) => r.cutoff_date)?.cutoff_date;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: -4 }}
       animate={{ opacity: 1, y: 0 }}
       className="rounded-xl border border-border-subtle bg-bg-card/80 backdrop-blur-sm shadow-sm p-4"
+      data-testid="gl-recon-card"
     >
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <div
-            className={`p-1.5 rounded-md ${
-              allTied ? "bg-db-green/15" : "bg-db-red/15"
-            }`}
-          >
+          <div className={`p-1.5 rounded-md ${allTied ? "bg-db-green/15" : "bg-db-red/15"}`}>
             {allTied ? (
               <CheckCircle2 className="w-4 h-4 text-db-green" />
             ) : (
@@ -75,10 +91,10 @@ export default function GLReconCard() {
               {loading
                 ? "Loading…"
                 : err
-                ? `error: ${err}`
+                ? `Data unavailable: ${err}`
                 : allTied
-                ? "All accounts tie out — loop closed ✓"
-                : "Imbalance detected — investigate red rows"}
+                ? `Tied · ${totalItems} item${totalItems === 1 ? "" : "s"} explained${cutoff ? ` · cut-off ${cutoff}` : ""}`
+                : "Unexplained difference — investigate red rows"}
             </p>
           </div>
         </div>
@@ -88,9 +104,7 @@ export default function GLReconCard() {
           aria-label="Refresh reconciliation"
           disabled={loading}
         >
-          <RefreshCw
-            className={`w-3.5 h-3.5 text-text-muted ${loading ? "animate-spin" : ""}`}
-          />
+          <RefreshCw className={`w-3.5 h-3.5 text-text-muted ${loading ? "animate-spin" : ""}`} />
         </button>
       </div>
 
@@ -98,49 +112,63 @@ export default function GLReconCard() {
         <table className="w-full text-xs">
           <thead>
             <tr className="text-text-muted border-b border-border-subtle">
-              <th className="text-left font-normal py-1.5">Acct</th>
-              <th className="text-left font-normal">Account</th>
+              <th className="text-left font-normal py-1.5">Account</th>
               <th className="text-right font-normal">Sub-ledger</th>
-              <th className="text-right font-normal">GL TB</th>
-              <th className="text-right font-normal">Δ</th>
-              <th className="text-center font-normal w-8">Tied</th>
+              <th className="text-right font-normal">GL</th>
+              <th className="text-right font-normal">Explained items</th>
+              <th className="text-right font-normal">Unexplained</th>
+              <th className="text-center font-normal w-14">Status</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr
-                key={r.account_code}
-                className={
-                  r.tied ? "" : "bg-db-red/5 ring-1 ring-db-red/30"
-                }
-              >
-                <td className="font-mono text-text-secondary py-2">
-                  {r.account_code}
-                </td>
-                <td className="text-text-primary">
-                  {r.account_name}
-                  <span className="ml-2 text-[9px] font-mono opacity-50">
-                    [{r.balance_type}]
-                  </span>
-                </td>
-                <td className="text-right tabular-nums">{inr(r.subledger_amount)}</td>
-                <td className="text-right tabular-nums">{inr(r.gl_amount)}</td>
-                <td
-                  className={`text-right tabular-nums ${
-                    Math.abs(r.delta) < 1 ? "text-db-green" : "text-db-red font-semibold"
-                  }`}
-                >
-                  {Math.abs(r.delta) < 1 ? "₹0.00" : inr(r.delta)}
-                </td>
-                <td className="text-center">
-                  {r.tied ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-db-green inline" />
-                  ) : (
-                    <AlertTriangle className="w-3.5 h-3.5 text-db-red inline" />
-                  )}
-                </td>
-              </tr>
-            ))}
+            {rows.map((r) => {
+              const tied = Math.abs(r.unexplained_delta) < 1;
+              const isOpen = !!open[r.account_code];
+              return (
+                <Fragment key={r.account_code}>
+                  <tr
+                    className={`${tied ? "" : "bg-db-red/5 ring-1 ring-db-red/30"} cursor-pointer hover:bg-bg-hover/40`}
+                    onClick={() => setOpen((o) => ({ ...o, [r.account_code]: !o[r.account_code] }))}
+                  >
+                    <td className="text-text-primary py-2">
+                      {r.items.length > 0 ? (
+                        isOpen ? <ChevronDown className="w-3 h-3 inline mr-1" /> : <ChevronRight className="w-3 h-3 inline mr-1" />
+                      ) : null}
+                      <span className="font-mono text-text-secondary mr-1.5">{r.account_code}</span>
+                      {r.account_name}
+                    </td>
+                    <td className="text-right tabular-nums">{inr(r.subledger_amount)}</td>
+                    <td className="text-right tabular-nums">{inr(r.gl_amount)}</td>
+                    <td className="text-right tabular-nums" data-testid={`recon-explained-${r.account_code}`}>
+                      {inr(r.reconciling_items_amount)}
+                      <span className="ml-1 text-[9px] text-text-muted">({r.reconciling_items_count})</span>
+                    </td>
+                    <td className={`text-right tabular-nums ${tied ? "text-db-green" : "text-db-red font-semibold"}`}>
+                      {tied ? "₹0" : inr(r.unexplained_delta)}
+                    </td>
+                    <td className="text-center">
+                      {tied ? (
+                        <span className="text-[10px] font-bold text-db-green">Tied</span>
+                      ) : (
+                        <AlertTriangle className="w-3.5 h-3.5 text-db-red inline" />
+                      )}
+                    </td>
+                  </tr>
+                  {isOpen &&
+                    r.items.map((it) => (
+                      <tr key={`${r.account_code}-${it.document_id}`} className="text-[10px] text-text-muted">
+                        <td className="pl-6 py-1 font-mono">{it.document_id}</td>
+                        <td colSpan={3} className="">
+                          {it.document_type} — {it.reason}
+                          {it.gl_je_id ? ` (GL: ${it.gl_je_id}${it.gl_je_status ? `, ${it.gl_je_status}` : ""})` : ""}
+                        </td>
+                        <td className="text-right tabular-nums">{inr(it.amount)}</td>
+                        <td />
+                      </tr>
+                    ))}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       ) : loading ? (
@@ -149,17 +177,13 @@ export default function GLReconCard() {
           <div className="h-3 bg-bg-hover/50 rounded animate-pulse" />
         </div>
       ) : (
-        <p className="text-[12px] text-text-muted italic">
-          Reconciliation view unavailable.
-        </p>
+        <p className="text-[12px] text-text-muted italic">—</p>
       )}
 
       {rows && rows.length > 0 && (
         <p className="mt-2 text-[10px] text-text-muted">
-          Sources: <code className="text-text-secondary">gold_fact_collections</code> and
-          {" "}
-          <code className="text-text-secondary">gold_fact_invoices</code> ↔
-          {" "}<code className="text-text-secondary">gold_fact_trial_balance</code>
+          Sources: <code className="text-text-secondary">gold_recon_subledger_vs_gl</code> and{" "}
+          <code className="text-text-secondary">gold_recon_reconciling_items</code>. Click a row for the items.
         </p>
       )}
     </motion.div>

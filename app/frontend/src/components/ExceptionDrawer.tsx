@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, AlertTriangle, ShieldAlert, Info, FileText, ShieldCheck } from "lucide-react";
 import { severityBadge, inr } from "../utils";
@@ -11,8 +11,27 @@ type Props = {
   onViewInvoice?: (id: string) => void;
 };
 
+type QueueRow = {
+  source: "lakebase" | "warehouse";
+  row: { exception_type?: string; release_blocked?: boolean; block_reason?: string;
+         last_action?: string; last_action_by?: string; last_action_at?: string };
+};
+
 export default function ExceptionDrawer({ exception, onClose, onViewInvoice }: Props) {
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [queue, setQueue] = useState<QueueRow | null>(null);
+  const invId = (exception?.data as Record<string, unknown> | undefined)?.invoice_id as string | undefined;
+
+  // Operational lookup of this invoice in the AP exception queue — served from the
+  // Lakebase synced table (Gold → Postgres), with its latest approval action.
+  useEffect(() => {
+    setQueue(null);
+    if (!invId || !invId.startsWith("INV")) return;
+    fetch(`/api/ap/exception-queue/${encodeURIComponent(invId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => setQueue(j))
+      .catch(() => setQueue(null));
+  }, [invId]);
   return (
     <AnimatePresence>
       {exception && (
@@ -53,6 +72,19 @@ export default function ExceptionDrawer({ exception, onClose, onViewInvoice }: P
                   <X className="w-5 h-5" />
                 </button>
               </div>
+
+              {queue && (
+                <div data-testid="queue-source" className="mb-4 px-3 py-2 rounded-lg border border-border-subtle text-[11px] text-text-muted">
+                  AP queue ({queue.source === "lakebase" ? "Lakebase synced table" : "warehouse fallback"}):{" "}
+                  <span className="text-text-primary font-medium">{queue.row.exception_type || "—"}</span>
+                  {queue.row.release_blocked && (
+                    <span className="ml-2 font-bold text-db-red">Blocked: PDF ≠ ERP</span>
+                  )}
+                  {queue.row.last_action && (
+                    <div className="mt-1">Last action: {queue.row.last_action} by {queue.row.last_action_by}</div>
+                  )}
+                </div>
+              )}
 
               {/* Severity badge */}
               <div className="mb-4">

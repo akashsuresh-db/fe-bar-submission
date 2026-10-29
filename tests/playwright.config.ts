@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const BASE_URL = process.env.APP_URL || "http://localhost:5173";
+// APP_URL = deployed app (enables test_e2e_deployed.spec.ts); LOCAL_URL = local dev server.
+const BASE_URL = process.env.APP_URL || process.env.LOCAL_URL || "http://localhost:5173";
 
 export default defineConfig({
   testDir: "./",

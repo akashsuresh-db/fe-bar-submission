@@ -34,6 +34,11 @@ _last_sql: str | None = None   # Last SQL pushed to the alert (avoid no-op updat
 # ── Exception type definitions ────────────────────────────────────────────────
 
 EXCEPTION_TYPES = {
+    "EXTRACTION_MISMATCH": {
+        "label":    "Release Blocked (PDF ≠ ERP)",
+        "filter":   "COALESCE(release_blocked, false)",
+        "severity": "CRITICAL",
+    },
     "AMOUNT_MISMATCH": {
         "label":    "Amount Mismatch",
         "filter":   "match_status = 'AMOUNT_MISMATCH'",
@@ -51,7 +56,7 @@ EXCEPTION_TYPES = {
     },
     "MISSING_GSTIN": {
         "label":    "Missing GSTIN",
-        "filter":   "gstin_vendor IS NULL",
+        "filter":   "(gstin_vendor IS NULL OR gstin_vendor = '')",
         "severity": "MEDIUM",
     },
 }
@@ -249,8 +254,12 @@ def pause_alert() -> None:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def run_escalation(exception_types: list[str]) -> dict:
+def run_escalation(exception_types: list[str], user_token: str | None = None) -> dict:
     """
+    The alert is created and owned by the app service principal (an app-owned,
+    persistent artefact found by name), so `user_token` is accepted for API
+    symmetry but intentionally not used for this write path.
+
     Arm the SQL Alert for the selected exception types.
     Databricks evaluates and sends the email within ~60 seconds.
 
@@ -258,17 +267,10 @@ def run_escalation(exception_types: list[str]) -> dict:
     """
     state = arm_alert(exception_types)
 
-    # Schedule background re-pause after 90 seconds
-    async def _delayed_pause():
-        await asyncio.sleep(90)
-        pause_alert()
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(_delayed_pause())
-    except RuntimeError:
-        pass  # No event loop — pause will not happen (alert auto-pauses next minute anyway)
+    # Re-pause after 90 seconds. This runs in a worker thread (asyncio.to_thread),
+    # so use a timer thread rather than the event loop.
+    import threading
+    threading.Timer(90, pause_alert).start()
 
     return {
         "status":          "scheduled",

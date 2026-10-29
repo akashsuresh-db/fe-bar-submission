@@ -10,7 +10,9 @@
 
 import { test, expect, Page } from "@playwright/test";
 
-const BASE_URL = process.env.APP_URL || "https://<your-app>.databricksapps.com";
+// The deployed app URL MUST be supplied; there is no hardcoded default.
+const BASE_URL = process.env.APP_URL || "";
+test.skip(!BASE_URL, "APP_URL is not set — skipping deployed-app tests");
 
 test.describe("Finance & Accounting Control Tower - End-to-End Tests", () => {
 
@@ -349,5 +351,36 @@ test.describe("Finance & Accounting Control Tower - End-to-End Tests", () => {
       console.log("⚠ Chat input not found for this test");
       await page.screenshot({ path: "./test-results/07_chat_history_updated.png", fullPage: true });
     }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FE BAR: live data, recon explained items, AI release control
+  // ═══════════════════════════════════════════════════════════════════
+  test("TEST 8: backend serves live rows (no demo mode, no banner)", async ({ page }) => {
+    await page.goto(BASE_URL);
+    const status = await page.request.get(`${BASE_URL}/api/data-status`);
+    const j = await status.json();
+    expect(j.demo_mode).toBe(false);
+    expect(j.live).toBe(true);
+    await expect(page.getByTestId("data-status-banner")).toHaveCount(0);
+  });
+
+  test("TEST 9: GL recon card shows explained items and Tied", async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.locator("button, [role=tab]").filter({ hasText: /GL|R2R/i }).first().click();
+    const card = page.getByTestId("gl-recon-card");
+    await expect(card.getByText("Explained items")).toBeVisible({ timeout: 30000 });
+    await expect(card.getByText(/Tied · \d+ items? explained/)).toBeVisible({ timeout: 30000 });
+  });
+
+  test("TEST 10: a tampered invoice in the Lakebase queue is release-blocked and HELD", async ({ page }) => {
+    await page.goto(BASE_URL);
+    const q = await (await page.request.get(`${BASE_URL}/api/ap/exception-queue?limit=50`)).json();
+    expect(q.source).toBe("lakebase");
+    const blocked = (q.rows as { invoice_id: string; release_blocked: boolean }[]).find((r) => r.release_blocked);
+    expect(blocked, "at least one release-blocked invoice in the queue").toBeTruthy();
+    const j = await (await page.request.get(`${BASE_URL}/api/verify-invoice/${blocked!.invoice_id}`)).json();
+    expect(j.release_blocked).toBe(true);
+    expect(j.recommendation.label).toBe("HOLD");
   });
 });

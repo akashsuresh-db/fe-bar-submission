@@ -20,10 +20,18 @@ import { test, expect, Page } from "@playwright/test";
 
 // ─── Helpers ──────────────────────────────────────────────────
 
-const BASE_URL = process.env.APP_URL || "http://localhost:5173";
+// Mocked UI tests: run against the local dev server unless APP_URL is set.
+const BASE_URL = process.env.APP_URL || process.env.LOCAL_URL || "http://localhost:5173";
 
 /** Mock the API endpoints so tests don't need real DB */
 async function mockAPIs(page: Page) {
+  await page.route("/api/data-status", (r) =>
+    r.fulfill({ json: { demo_mode: false, live: true, banner: null, last_error: null, auth_mode: "obo" } })
+  );
+  await page.route("/api/recon", (r) => r.fulfill({ json: RECON_TIED }));
+  await page.route("/api/ap/exception-queue/**", (r) =>
+    r.fulfill({ json: { source: "lakebase", row: { exception_type: "EXTRACTION_MISMATCH", release_blocked: true } } })
+  );
   await page.route("/api/health", (r) =>
     r.fulfill({ json: { status: "healthy", app: "finance-operations" } })
   );
@@ -106,6 +114,28 @@ async function mockAPIs(page: Page) {
     })
   );
 }
+
+const RECON_TIED = {
+  all_tied: true,
+  rows: [
+    {
+      account_code: "1100", account_name: "Accounts Receivable", subledger_source: "gold_fact_collections",
+      subledger_amount: 648700000, gl_amount: 641200000, delta: 7500000,
+      reconciling_items_amount: 7500000, reconciling_items_count: 3, unexplained_delta: 0, tied: true,
+      cutoff_date: "2026-09-30",
+      items: [
+        { document_id: "CINV000101", document_type: "AR_INVOICE", amount: 2500000,
+          reason: "Posted to sub-ledger after GL cut-off", gl_je_id: null, gl_je_status: null },
+      ],
+    },
+    {
+      account_code: "2000", account_name: "Accounts Payable", subledger_source: "gold_fact_invoices",
+      subledger_amount: 80600000, gl_amount: 81000000, delta: -400000,
+      reconciling_items_amount: -400000, reconciling_items_count: 1, unexplained_delta: 0, tied: true,
+      cutoff_date: "2026-09-30", items: [],
+    },
+  ],
+};
 
 /** Mock SSE stream with predefined events */
 function makeSseBody(events: object[]) {
@@ -863,5 +893,80 @@ test.describe("Responsiveness", () => {
     await arTab.scrollIntoViewIfNeeded();
     await arTab.click();
     await expect(page.locator("text=/DSO|Outstanding/i").first()).toBeVisible({ timeout: 5000 });
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════
+// FE BAR controls: recon explained items, AI release block, live-data banner
+// ═══════════════════════════════════════════════════════════════
+
+test.describe("FE BAR controls", () => {
+  test("recon card shows sub-ledger, GL and explained items; Tied only when unexplained is zero", async ({ page }) => {
+    await mockAPIs(page);
+    await page.goto(BASE_URL);
+    await page.locator("button, [role=tab]").filter({ hasText: /GL|R2R/i }).first().click();
+    const card = page.getByTestId("gl-recon-card");
+    await expect(card).toBeVisible({ timeout: 5000 });
+    await expect(card.getByText("Explained items")).toBeVisible();
+    await expect(card.getByTestId("recon-explained-1100")).toContainText("(3)");
+    await expect(card.getByText(/Tied · 4 items explained/)).toBeVisible();
+  });
+
+  test("recon card does not say Tied when a delta is unexplained", async ({ page }) => {
+    await mockAPIs(page);
+    await page.route("/api/recon", (r) =>
+      r.fulfill({ json: { all_tied: false, rows: [{ ...RECON_TIED.rows[0], unexplained_delta: 125000, tied: false }] } })
+    );
+    await page.goto(BASE_URL);
+    await page.locator("button, [role=tab]").filter({ hasText: /GL|R2R/i }).first().click();
+    const card = page.getByTestId("gl-recon-card");
+    await expect(card.getByText(/Unexplained difference/)).toBeVisible({ timeout: 5000 });
+    await expect(card.getByText("Tied", { exact: true })).toHaveCount(0);
+  });
+
+  test("tampered invoice shows the Blocked: PDF ≠ ERP badge", async ({ page }) => {
+    await mockAPIs(page);
+    await page.route("/stream/p2p", (r) =>
+      r.fulfill({
+        headers: { "content-type": "text/event-stream; charset=utf-8" },
+        body: makeSseBody([
+          { type: "greeting", data: { role: "AP Operations Lead", message: "1 invoice queued." } },
+          { type: "invoice", data: {
+              invoice_id: "INV000033", invoice_number: "VINV-2026-033", vendor_name: "Acme Ltd",
+              vendor_category: "IT Services", invoice_date: "2026-09-01", due_date: "2026-10-01",
+              invoice_total_inr: 1180000, match_status: "THREE_WAY_MATCHED", release_blocked: "true",
+              block_reason: "PDF total differs from ERP by -10.0%", is_overdue: "false",
+          } },
+          { type: "summary", data: { processed: 1, matched: 0, exceptions: 1, touchless_rate: 0, message: "done" } },
+        ]),
+      })
+    );
+    await page.goto(BASE_URL);
+    await page.getByText(/Start Processing/i).click();
+    await expect(page.getByTestId("release-blocked-badge").first()).toHaveText(/Blocked: PDF ≠ ERP/, { timeout: 5000 });
+  });
+
+  test("warehouse outage shows the banner and KPI dashes, not invented numbers", async ({ page }) => {
+    await mockAPIs(page);
+    await page.route("/api/data-status", (r) =>
+      r.fulfill({ json: { demo_mode: false, live: false, banner: "Warehouse starting — data unavailable" } })
+    );
+    await page.route("/api/metrics/p2p", (r) =>
+      r.fulfill({ status: 503, json: { error: "warehouse_unavailable", message: "Warehouse starting — data unavailable" } })
+    );
+    await page.goto(BASE_URL);
+    await expect(page.getByTestId("data-status-banner")).toContainText("Warehouse starting", { timeout: 5000 });
+    await expect(page.getByText("Touchless Rate").first()).toBeVisible();
+    await expect(page.getByText("—").first()).toBeVisible();
+  });
+
+  test("demo mode is labelled as demo data", async ({ page }) => {
+    await mockAPIs(page);
+    await page.route("/api/data-status", (r) =>
+      r.fulfill({ json: { demo_mode: true, live: false, banner: "Demo data — not connected to the lakehouse" } })
+    );
+    await page.goto(BASE_URL);
+    await expect(page.getByTestId("data-status-banner")).toContainText("Demo data", { timeout: 5000 });
   });
 });

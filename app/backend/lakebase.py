@@ -12,6 +12,8 @@ import json
 import datetime
 from typing import Any
 
+from backend.config import LAKEBASE_QUEUE_TABLE
+
 # Track whether we're in demo mode
 _demo_mode = False
 _init_error: str | None = None   # last error from init_schema — surfaced in /api/debug/status
@@ -28,8 +30,15 @@ def get_status() -> dict:
         "host": os.environ.get("PGHOST") or os.environ.get("LAKEBASE_HOST") or "(not set)",
         "user": os.environ.get("PGUSER") or os.environ.get("LAKEBASE_USER") or "(not set)",
         "instance": os.environ.get("LAKEBASE_INSTANCE_NAME", "finance-ops-db"),
+        "database": os.environ.get("PGDATABASE") or "(not set)",
+        "connected": not _demo_mode,
+        "queue_table": LAKEBASE_QUEUE_TABLE,
         "in_memory_chat_rows": len(_in_memory_chat_history),
     }
+
+
+def is_connected() -> bool:
+    return not _demo_mode
 
 
 def _fresh_token() -> str:
@@ -427,3 +436,53 @@ def get_user_approvals(user: str, limit: int = 20) -> list[dict[str, Any]]:
             conn.close()
     except Exception:
         return [r for r in _in_memory_approvals if r["approved_by"] == user][:limit]
+
+
+# ─── Operational serving: AP exception queue (synced table) ──────────────
+
+
+def _queue_table_sql() -> str:
+    """Quote LAKEBASE_QUEUE_TABLE ("schema.table") as a Postgres identifier."""
+    parts = [p.strip().strip('"') for p in LAKEBASE_QUEUE_TABLE.split(".") if p.strip()]
+    for p in parts:
+        if not p.replace("_", "").isalnum():
+            raise ValueError(f"invalid queue table identifier: {LAKEBASE_QUEUE_TABLE}")
+    return ".".join(f'"{p}"' for p in parts)
+
+
+def get_ap_exception_queue(limit: int = 200, invoice_id: str | None = None) -> list[dict[str, Any]] | None:
+    """Read the AP exception queue from the Lakebase synced table (Gold → Postgres).
+
+    The latest approval action recorded by the app (public.ap_approvals, same
+    database) is joined in, so the queue shows what has already been actioned.
+    Returns None when Lakebase is not connected or the synced table is missing,
+    so the caller can fall back to the warehouse and say so.
+    """
+    if _demo_mode:
+        return None
+    try:
+        import psycopg2.extras
+        conn = _get_conn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                where = "WHERE q.invoice_id = %s" if invoice_id else ""
+                params: tuple = (invoice_id, limit) if invoice_id else (limit,)
+                cur.execute(
+                    f"""SELECT q.*, a.action AS last_action, a.approved_by AS last_action_by,
+                               a.approved_at AS last_action_at
+                        FROM {_queue_table_sql()} q
+                        LEFT JOIN LATERAL (
+                            SELECT action, approved_by, approved_at FROM public.ap_approvals
+                            WHERE invoice_id = q.invoice_id ORDER BY approved_at DESC LIMIT 1
+                        ) a ON true
+                        {where}
+                        ORDER BY q.release_blocked DESC NULLS LAST, q.invoice_total_inr DESC NULLS LAST
+                        LIMIT %s""",
+                    params,
+                )
+                return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"Lakebase AP queue read failed ({LAKEBASE_QUEUE_TABLE}): {e}")
+        return None
