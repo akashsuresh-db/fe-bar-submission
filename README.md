@@ -32,7 +32,7 @@ Invoice cost benchmark: Ardent Partners ePayables. All inputs are illustrative e
 | Duplicate invoices blocked before payment | 27 (₹26.77 Cr) |
 | Value held for review in the exception queue | 407 invoices (₹410.24 Cr) |
 | Tampered invoice PDFs caught by the AI control | 3 of 3, with 0 clean invoices blocked |
-| AI extraction accuracy (total / PO / GSTIN) | ⟦accuracy⟧ |
+| AI extraction accuracy (total / PO / GSTIN) | 100% / 100% / 100% on 200 PDFs (MLflow run `f6233b66d98c47d99e58cb7b938421bc`) |
 | Sub-ledger to GL reconciliation | Tied: AR ₹1.53 Cr and AP ₹0.80 Cr differences fully explained by 4 named items; unexplained ₹0 |
 | Trial balance | Balances in every period (DR = CR) |
 
@@ -59,7 +59,7 @@ Lakebase → Unity Catalog write-back (ops_* tables), queryable by Genie
 
 | Stage | Product | Main tables / objects | Evidence |
 |---|---|---|---|
-| Ingest | Lakeflow declarative pipeline, Auto Loader | `bronze_*` (17 streaming tables) | `evidence/F4_job_runs.md`, `evidence/pipeline_event_log.md` |
+| Ingest | Lakeflow declarative pipeline, Auto Loader | `bronze_*` (17 streaming tables), 36 expectations | `evidence/F4_job_runs.md`, `evidence/pipeline_event_log.md` |
 | Transform and quality | Lakeflow expectations, quarantine tables | `silver_p2p_invoices`, `silver_invoice_exceptions`, `silver_duplicate_invoices`, `silver_je_quarantine` | `evidence/pipeline_event_log.md` |
 | Intelligence | AI Functions in the pipeline, MLflow | `silver_invoice_extractions`, `gold_ai_extraction_eval` | `evidence/ai_eval.md` |
 | Business layer | Lakeflow materialized views | `gold_fact_*`, `gold_recon_*` | `evidence/F1_recon.md`, `evidence/kpi_queries.md` |
@@ -74,6 +74,7 @@ Lakebase → Unity Catalog write-back (ops_* tables), queryable by Genie
 |---|---|---|---|
 | AI extraction placement | `ai_parse_document` + `ai_extract` inside the pipeline as a streaming table | Separate notebook after the pipeline | One dependency graph, each PDF parsed exactly once, no double pipeline run; the cost is that the pipeline needs AI Functions on serverless |
 | AI control | Block release when the PDF disagrees with the ERP on total (0.5%), GSTIN or PO | Flag only | A tampered invoice must never count as touchless; the touchless rate drops by the blocked invoices |
+| AI output validation | Keep an extracted GSTIN only when it matches the GSTIN format | Trust the model output | Testing showed the model inventing GSTIN-like numbers for foreign vendors (accuracy 0.765); the guardrail raised it to 1.0 |
 | Reconciliation | GL posted from sub-ledgers; delta explained by documented items | Override the GL with sub-ledger totals | A tie-out by construction proves nothing; an explained delta is what auditors accept |
 | Data reads in the app | On-behalf-of-user authorization | App service principal | Row filters and masks apply per user; the service principal remains for background streams only |
 | AP queue serving | Lakebase synced table from Gold | Direct warehouse queries | Millisecond reads for the queue the clerks work all day, with no warehouse warm-up |

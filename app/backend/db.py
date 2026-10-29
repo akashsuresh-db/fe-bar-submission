@@ -459,9 +459,8 @@ def get_r2r_metrics() -> dict:
         FROM {full_table('gold_fact_gl')}
     """)
 
-    latest = f"""(fiscal_year, period) = (
-        SELECT fiscal_year, period FROM {full_table('gold_fact_trial_balance')}
-        ORDER BY fiscal_year DESC, period DESC LIMIT 1)"""
+    # period is 'yyyy-MM', so the latest period identifies the latest fiscal year too
+    latest = f"""period = (SELECT MAX(period) FROM {full_table('gold_fact_trial_balance')})"""
 
     trial_balance = query(f"""
         SELECT account_code, account_name, account_type, account_subtype,

@@ -1,0 +1,193 @@
+{
+  "reset_landing": {
+    "task_run_id": 372689428866847,
+    "output": {
+      "catalog": "akash_fevm_ts_catalog",
+      "schema": "finance_ops_control_tower",
+      "cleared": {
+        "raw_csv": 16,
+        "raw_invoices": 200
+      }
+    }
+  },
+  "generate_data": {
+    "task_run_id": 913452274024282,
+    "output": {
+      "raw_csv_path": "/Volumes/akash_fevm_ts_catalog/finance_ops_control_tower/raw_csv",
+      "rows": {
+        "vendors": 100,
+        "customers": 150,
+        "chart_of_accounts": 28,
+        "cost_centers": 8,
+        "po_header": 500,
+        "po_line": 2191,
+        "grn": 206,
+        "p2p_invoices": 577,
+        "p2p_payments": 382,
+        "sales_orders": 600,
+        "so_lines": 1842,
+        "o2c_invoices": 262,
+        "o2c_payments": 229,
+        "journal_entries": 1982,
+        "je_lines": 4747,
+        "recon_seed_items": 4
+      },
+      "duplicate_invoices": 27,
+      "gstin_match_pct": 97.9,
+      "reconciling_items": 4
+    }
+  },
+  "generate_pdf_invoices": {
+    "task_run_id": 938535252760706,
+    "output": {
+      "pdfs_generated": 200,
+      "failures": 0,
+      "tampered_invoices": [
+        "INV000128",
+        "INV000198",
+        "INV000204"
+      ]
+    }
+  },
+  "governance_pre": {
+    "task_run_id": 772093678631303,
+    "output": {
+      "phase": "pre",
+      "catalog": "akash_fevm_ts_catalog",
+      "schema": "finance_ops_control_tower",
+      "groups": [
+        "finance_controllers",
+        "ap_analysts_in",
+        "ap_analysts_uk"
+      ],
+      "functions": [
+        "rf_legal_entity",
+        "mask_bank_account",
+        "mask_gstin"
+      ]
+    }
+  },
+  "run_pipeline": {
+    "task_run_id": 882026526669960,
+    "result": "SUCCESS"
+  },
+  "ai_extraction_eval": {
+    "task_run_id": 751824380370109,
+    "output": {
+      "documents_evaluated": 200,
+      "accuracy_total": 1.0,
+      "accuracy_po_reference": 1.0,
+      "accuracy_gstin": 1.0,
+      "accuracy_invoice_number": 1.0,
+      "accuracy_invoice_date": 1.0,
+      "accuracy_due_date": 1.0,
+      "tampered_documents": 3,
+      "tampered_caught": 3,
+      "tamper_recall": 1.0,
+      "tamper_precision": 1.0,
+      "clean_blocked_false_positives": 0,
+      "false_positive_rate": 0.0,
+      "mlflow_run_id": "f6233b66d98c47d99e58cb7b938421bc",
+      "mlflow_experiment": "/Users/akash.s@databricks.com/fna_control_tower_ai_extraction_eval"
+    }
+  },
+  "governance_post": {
+    "task_run_id": 705379442147438,
+    "output": {
+      "phase": "post",
+      "catalog": "akash_fevm_ts_catalog",
+      "schema": "finance_ops_control_tower",
+      "tagged_tables": 22,
+      "pii_columns": [
+        "silver_invoice_extractions.extracted_bank_account",
+        "silver_invoice_extractions.extracted_ifsc",
+        "silver_invoice_extractions.extracted_gstin",
+        "bronze_vendors.bank_account",
+        "bronze_vendors.bank_ifsc",
+        "bronze_vendors.gstin",
+        "bronze_vendors.contact_email",
+        "bronze_customers.gstin",
+        "bronze_customers.contact_email",
+        "gold_dim_vendor.gstin",
+        "gold_fact_invoices.gstin_vendor"
+      ],
+      "grants": [],
+      "failures": [
+        {
+          "grant": "GRANT USE CATALOG ON CATALOG akash_fevm_ts_catalog TO `finance_controllers`",
+          "error": "[RequestId=c1a937f5-6eb8-475d-889e-8b8beaa72579 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name finance_controllers.\n\nJVM stacktrace:\ncom.databricks.sq"
+        },
+        {
+          "grant": "GRANT USE SCHEMA ON SCHEMA akash_fevm_ts_catalog.finance_ops_control_tower TO `finance_controllers`",
+          "error": "[RequestId=f965d82b-efa4-4e53-8b75-441e05e64c30 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name finance_controllers.\n\nJVM stacktrace:\ncom.databricks.sq"
+        },
+        {
+          "grant": "GRANT SELECT ON SCHEMA akash_fevm_ts_catalog.finance_ops_control_tower TO `finance_controllers`",
+          "error": "[RequestId=6f40f704-7b4b-45cd-bbdc-5306daca99bd ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name finance_controllers.\n\nJVM stacktrace:\ncom.databricks.sq"
+        },
+        {
+          "grant": "GRANT READ VOLUME ON VOLUME akash_fevm_ts_catalog.finance_ops_control_tower.raw_invoices TO `finance_controllers`",
+          "error": "[RequestId=f4bbd067-1f3a-41c3-9c02-7f67b9c31ce8 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name finance_controllers.\n\nJVM stacktrace:\ncom.databricks.sq"
+        },
+        {
+          "grant": "GRANT USE CATALOG ON CATALOG akash_fevm_ts_catalog TO `ap_analysts_in`",
+          "error": "[RequestId=85a2eb77-6363-46f9-80e6-044434eb52e5 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_in.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        },
+        {
+          "grant": "GRANT USE SCHEMA ON SCHEMA akash_fevm_ts_catalog.finance_ops_control_tower TO `ap_analysts_in`",
+          "error": "[RequestId=e219f941-e946-445a-bde9-2ba87ac733c1 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_in.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        },
+        {
+          "grant": "GRANT SELECT ON SCHEMA akash_fevm_ts_catalog.finance_ops_control_tower TO `ap_analysts_in`",
+          "error": "[RequestId=07bdd4d2-014b-4426-a279-6fedc5dea8ed ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_in.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        },
+        {
+          "grant": "GRANT READ VOLUME ON VOLUME akash_fevm_ts_catalog.finance_ops_control_tower.raw_invoices TO `ap_analysts_in`",
+          "error": "[RequestId=122e18d5-4435-4baa-84b0-10dd461f3bf2 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_in.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        },
+        {
+          "grant": "GRANT USE CATALOG ON CATALOG akash_fevm_ts_catalog TO `ap_analysts_uk`",
+          "error": "[RequestId=3846af31-e96c-40d2-84d5-cd9447ec6bea ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_uk.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        },
+        {
+          "grant": "GRANT USE SCHEMA ON SCHEMA akash_fevm_ts_catalog.finance_ops_control_tower TO `ap_analysts_uk`",
+          "error": "[RequestId=b1b87dcf-d9e1-42ff-b982-780b38846436 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_uk.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        },
+        {
+          "grant": "GRANT SELECT ON SCHEMA akash_fevm_ts_catalog.finance_ops_control_tower TO `ap_analysts_uk`",
+          "error": "[RequestId=5fda84c3-28b7-485c-90a6-e60cbef3aeeb ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_uk.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        },
+        {
+          "grant": "GRANT READ VOLUME ON VOLUME akash_fevm_ts_catalog.finance_ops_control_tower.raw_invoices TO `ap_analysts_uk`",
+          "error": "[RequestId=8f2fb606-adb1-481b-8485-cba7b5816577 ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name ap_analysts_uk.\n\nJVM stacktrace:\ncom.databricks.sql.man"
+        }
+      ]
+    }
+  },
+  "lakebase_sync": {
+    "task_run_id": 924330529857854,
+    "output": {
+      "instance": "fna-control-tower-db",
+      "database": "databricks_postgres",
+      "host": "ep-still-math-d2odnn98.database.us-east-1.cloud.databricks.com",
+      "synced_table": "akash_fevm_ts_catalog.finance_ops_control_tower.ap_exception_queue",
+      "synced_action": "refreshed",
+      "postgres_table": "\"finance_ops_control_tower\".\"ap_exception_queue\"",
+      "postgres_rows": 407,
+      "writeback_rows": {
+        "ap_approvals": "not created yet (app has not started)",
+        "ar_call_logs": "not created yet (app has not started)",
+        "chat_history": "not created yet (app has not started)"
+      }
+    }
+  },
+  "genie_space": {
+    "task_run_id": 200659033329541,
+    "output": {
+      "space_id": "01f1d38f62131010a21422b74b92e9e6",
+      "action": "updated",
+      "tables": 13,
+      "url": "https://fevm-akash-fevm-ts.cloud.databricks.com/genie/rooms/01f1d38f62131010a21422b74b92e9e6"
+    }
+  }
+}

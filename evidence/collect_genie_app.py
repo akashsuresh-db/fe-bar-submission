@@ -103,14 +103,22 @@ def main():
         calls = [("GET", "/api/health", None), ("GET", "/api/debug/status", None),
                  ("GET", "/api/metrics/p2p", None), ("GET", "/api/metrics/o2c", None),
                  ("GET", "/api/metrics/r2r", None), ("GET", "/api/recon", None),
-                 ("GET", "/api/verify-invoice/INV000033", None), ("GET", "/api/summary/P2P", None)]
+                 ("GET", "/api/verify-invoice/INV000198", None), ("GET", "/api/ap/exception-queue?limit=5", None),
+                 ("GET", "/api/summary/P2P", None),
+                 ("POST", "/api/approve", {"invoice_id": "INV000198", "action": "REJECT",
+                                           "reason": "PDF total 7% above ERP; vendor asked to reissue"}),
+                 ("POST", "/api/call-log", {"customer_id": "CUS0001", "customer_name": "Scripted test customer",
+                                            "outcome": "PTP", "ptp_date": "2026-11-15", "notes": "Evidence run"}),
+                 ("POST", "/api/chat", {"question": "Which invoices were blocked because the PDF disagrees with the ERP?",
+                                        "session_id": "", "previous_response_id": ""}),
+                 ("GET", "/api/ap/exception-queue/INV000198", None)]
         parts = [f"# App API responses\n\n_Collected {ts} from `{base}` with a Bearer token (masked)._\n"]
         for method, path, body in calls:
             code, text = http(base + path, token, method, body)
             try:
                 text = json.dumps(json.loads(text), indent=2)
             except Exception:
-                pass
+                pass  # SSE streams are kept as raw event lines
             parts.append(f"## `{method} {path}` → {code}\n\n```json\n{text[:6000]}\n```\n")
         (HERE / "app_api_responses.md").write_text("\n".join(parts))
         print("wrote evidence/app_api_responses.md")
