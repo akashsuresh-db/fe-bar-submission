@@ -7,7 +7,7 @@
 # MAGIC | Phase | When | What |
 # MAGIC |---|---|---|
 # MAGIC | `pre` | before the pipeline | Finance groups, the group → legal-entity map, the row-filter function and the column-mask functions. The pipeline attaches them to `gold_fact_invoices`, `gold_fact_collections` (row filter on `legal_entity`) and `silver_invoice_extractions` (masks on bank account, IFSC and GSTIN). |
-# MAGIC | `post` | after the pipeline | Tags (`fna_process` = P2P/O2C/R2R, `pii` on sensitive columns) and least-privilege grants (`USE CATALOG`, `USE SCHEMA`, `SELECT`; never `ALL PRIVILEGES`). |
+# MAGIC | `post` | after the pipeline | Tags (`fna_process` = P2P/O2C/R2R, `fna_pii` on sensitive columns) and least-privilege grants (`USE CATALOG`, `USE SCHEMA`, `SELECT`; never `ALL PRIVILEGES`). |
 # MAGIC
 # MAGIC Access model:
 # MAGIC - `finance_controllers` see every legal entity and clear bank details.
@@ -86,7 +86,7 @@ if PHASE == "pre":
 
 # COMMAND ----------
 
-# The shared metastore has a governed tag policy on `domain`, so the process tag uses its own key.
+# The shared metastore has governed tag policies on `domain` and `project`, so the tags use an `fna_` prefix.
 DOMAIN_TAGS = {
     "P2P": ["bronze_vendors", "bronze_p2p_invoices", "silver_p2p_invoices", "silver_invoice_extractions",
             "silver_invoice_exceptions", "silver_duplicate_invoices", "gold_dim_vendor", "gold_fact_invoices",
@@ -120,7 +120,7 @@ if PHASE == "post":
     for domain, tables in DOMAIN_TAGS.items():
         for t in tables:
             try:
-                alter(t, f"SET TAGS ('fna_process' = '{domain}', 'project' = 'finance_ops_control_tower')")
+                alter(t, f"SET TAGS ('fna_process' = '{domain}', 'fna_project' = 'finance_ops_control_tower')")
                 tagged.append(t)
             except Exception as e:
                 failures.append({"table": t, "error": str(e)[:200]})
@@ -128,7 +128,7 @@ if PHASE == "post":
     for t, cols in PII_COLUMNS.items():
         for c in cols:
             try:
-                alter(t, f"ALTER COLUMN {c} SET TAGS ('pii' = 'true')")
+                alter(t, f"ALTER COLUMN {c} SET TAGS ('fna_pii' = 'true')")
                 pii.append(f"{t}.{c}")
             except Exception as e:
                 failures.append({"table": f"{t}.{c}", "error": str(e)[:200]})

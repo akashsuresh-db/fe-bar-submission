@@ -395,7 +395,9 @@ def _line_items_for(invoice_amount: float, vendor_category: str) -> list[tuple]:
 # 200 genuine invoices (not re-submitted duplicates) get a PDF; the sample is deterministic.
 import random as _random
 RAW_CSV = f"/Volumes/{CATALOG}/{SCHEMA}/raw_csv"
-_csv = lambda e: spark.read.option("header", "true").option("escape", '"').option("inferSchema", "true").csv(f"{RAW_CSV}/{e}")
+# multiLine: generated addresses can contain quoted line breaks (the pipeline's Auto Loader reads them the same way)
+_csv = lambda e: (spark.read.option("header", "true").option("escape", '"').option("multiLine", "true")
+                  .option("inferSchema", "true").csv(f"{RAW_CSV}/{e}"))
 _csv("p2p_invoices").createOrReplaceTempView("raw_p2p_invoices")
 _csv("vendors").createOrReplaceTempView("raw_vendors")
 _ids = sorted(r[0] for r in spark.sql("SELECT invoice_id FROM raw_p2p_invoices WHERE invoice_id < 'INV900000'").collect())
@@ -426,6 +428,8 @@ LEFT JOIN raw_vendors AS v ON i.vendor_id = v.vendor_id
 """).collect()
 
 print(f"Canonical rows pulled: {len(canonical)}")
+missing_vendor = [r["invoice_id"] for r in canonical if not r["vendor_name"]]
+assert not missing_vendor, f"Vendor master join failed for {len(missing_vendor)} invoices, e.g. {missing_vendor[:5]}"
 
 # COMMAND ----------
 
