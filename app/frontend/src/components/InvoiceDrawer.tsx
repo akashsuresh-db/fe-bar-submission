@@ -7,7 +7,7 @@
  *
  * Used by AIChatPanel (invoice ID clicks in chat) and APTab (exception panel).
  */
-import { usdExact } from "../utils";
+import { usdExact, INR_PER_USD } from "../utils";
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { FileText, X, AlertTriangle, CheckCircle, XCircle, Download, Loader2 } from "lucide-react";
@@ -24,6 +24,8 @@ export type InvoiceDetail = {
   invoice_date: string;
   due_date: string;
   invoice_amount: number;
+  invoice_total?: number | null;
+  extracted_total_amount?: number | null;
   po_amount: number;
   status: string | null;
   gstin: string | null;
@@ -145,7 +147,9 @@ function InvoicePanel({
                   ["Vendor", detail.vendor_name ?? detail.vendor_id],
                   ["Invoice #", detail.invoice_number ?? detail.invoice_id],
                   ["Status", detail.status ?? "—"],
-                  ["Invoice Amt", fmt(detail.invoice_amount)],
+                  ["Subtotal (pre-tax)", fmt(detail.invoice_amount)],
+                  ["ERP Total", fmt(detail.invoice_total ?? 0)],
+                  ["PDF Total (AI read)", fmt(detail.extracted_total_amount ?? 0)],
                   ["PO Amt", fmt(detail.po_amount)],
                   ["Due Date", detail.due_date || "—"],
                 ].map(([label, val]) => (
@@ -155,6 +159,15 @@ function InvoicePanel({
                   </div>
                 ))}
               </div>
+
+              {/* The PDF is the vendor's original tax invoice, printed in INR with Indian digit grouping */}
+              {detail.extracted_total_amount ? (
+                <div className="mt-2 text-[10px] text-text-muted">
+                  Source PDF below is the vendor's original invoice in INR: total INR{" "}
+                  {detail.extracted_total_amount.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}{" "}
+                  = {usdExact(detail.extracted_total_amount)} at {INR_PER_USD} INR per US$.
+                </div>
+              ) : null}
 
               {/* Amount mismatch callout */}
               {detail.quarantine_reason === "AMOUNT_MISMATCH" && detail.po_amount > 0 && (
