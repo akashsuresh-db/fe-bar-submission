@@ -43,8 +43,8 @@ finance data, with a control built into each pillar:
   names the customers to chase first; collectors log calls and promise-to-pay dates in Lakebase, and a write-back job
   copies them into Unity Catalog.
 - **Record-to-report: close with confidence.** The general ledger is posted from the sub-ledgers. The reconciliation
-  shows AR and AP differences of ₹1.53 Cr and ₹0.80 Cr, each explained by named documents whose journals are still in
-  draft (₹0 unexplained), and the trial balance balances in every period.
+  shows AR and AP differences of $174K and $91K, each explained by named documents whose journals are still in
+  draft ($0 unexplained), and the trial balance balances in every period.
 - **The CFO asks anything.** A Genie Agent over 13 governed tables answers questions across vendors, customers and
   balances in the app chat. The app reads on behalf of the signed-in user, so a UK analyst sees only 109 UK invoices
   with masked bank details while a controller sees all 550.
@@ -91,14 +91,14 @@ across all three pillars:
   pilot target, against a 29% industry average and 51% best in class) and $0.5M payment leakage blocked
 - **Record-to-report:** $0.3M close effort from a daily tie-out instead of a 5–10 day month end
 
-**Proven on the build (synthetic data, every figure traced to a query in `evidence/`):**
+**Proven on the build (synthetic data, every figure traced to a query in `evidence/`; the build stores INR, shown here in US$ at 88 per dollar):**
 
 - **Procure-to-pay:** 34.4% touchless (189 of 550) on a deliberately exception-heavy test set; 3 of 3 tampered
-  invoices blocked, one of them (INV000198, +7%) otherwise payable touchless; 27 duplicates (₹26.8 Cr) stopped before
+  invoices blocked, one of them (INV000198, +7%) otherwise payable touchless; 27 duplicates ($3.0M) stopped before
   payment; 407 exceptions routed with a reason
-- **Order-to-cash:** ₹17.37 Cr open across 37 customers, 59-day DSO, 88.9% collection effectiveness, overdue items
+- **Order-to-cash:** $2.0M open across 37 customers, 59-day DSO, 88.9% collection effectiveness, overdue items
   flagged live and calls logged to Lakebase and Unity Catalog
-- **Record-to-report:** sub-ledgers tied to the GL with every difference explained (₹0 unexplained); trial balance
+- **Record-to-report:** sub-ledgers tied to the GL with every difference explained ($0 unexplained); trial balance
   balanced in every period; five unbalanced journals kept out of the GL
 - **CFO view:** Genie answered 6 of 6 test questions across the three pillars, with per-user governance enforced in
   the app and in Genie

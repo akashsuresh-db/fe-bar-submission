@@ -31,16 +31,16 @@ cost of $0.25M a year. A 5-day DSO reduction also releases **$16M of cash** once
 
 Benchmarks: Ardent Partners [State of ePayables 2025](https://tradeshift.com/wp-content/uploads/2025/07/Ardent-Partners-State-of-ePayables-2025-Tradeshift.pdf) (touchless) and [AP Metrics that Matter 2025](https://www.datocms-assets.com/80283/1744404602-ardent-partners-ap-metrics-that-matter-in-2025-pagero-final.pdf) ($9.40 per invoice). All inputs are illustrative estimates for this customer profile.
 
-**Proven on the build** (live results, `evidence/kpi_queries.md`):
+**Proven on the build** (live results, `evidence/kpi_queries.md`; the build stores INR, shown here in US$ at 88 per dollar):
 
 | Result | Value |
 |---|---|
 | Touchless rate (clean three-way match, not release-blocked) | 34.4% (189 of 550 invoices) |
-| Duplicate invoices blocked before payment | 27 (₹26.77 Cr) |
-| Value held for review in the exception queue | 407 invoices (₹410.24 Cr) |
+| Duplicate invoices blocked before payment | 27 ($3.0M) |
+| Value held for review in the exception queue | 407 invoices ($46.6M) |
 | Tampered invoice PDFs caught by the AI control | 3 of 3, with 0 clean invoices blocked |
 | AI extraction accuracy (total / PO / GSTIN) | 100% / 100% / 100% on 200 PDFs (MLflow run `f6233b66d98c47d99e58cb7b938421bc`) |
-| Sub-ledger to GL reconciliation | Tied: AR ₹1.53 Cr and AP ₹0.80 Cr differences fully explained by 4 named items; unexplained ₹0 |
+| Sub-ledger to GL reconciliation | Tied: AR $174K and AP $91K differences fully explained by 4 named items; unexplained $0 |
 | Trial balance | Balances in every period (DR = CR) |
 
 ## 2. Architecture
