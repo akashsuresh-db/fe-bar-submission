@@ -100,11 +100,13 @@ def _markdown_table(columns: list[str], rows: list[list], cap: int = 10) -> str:
     if not columns:
         return ""
 
-    def cell(v):
+    def cell(v, col):
         if v is None:
             return ""
         try:
             f = float(v)
+            if col.lower().endswith("_usd"):  # already converted in SQL
+                return f"${f:,.0f}"
             if abs(f) >= 1000:
                 return f"{f:,.0f}"
         except (TypeError, ValueError):
@@ -112,7 +114,7 @@ def _markdown_table(columns: list[str], rows: list[list], cap: int = 10) -> str:
         return str(v).replace("|", "\\|")
 
     head = "| " + " | ".join(columns) + " |\n|" + "---|" * len(columns) + "\n"
-    body = "".join("| " + " | ".join(cell(v) for v in r) + " |\n" for r in rows[:cap])
+    body = "".join("| " + " | ".join(cell(v, c) for v, c in zip(r, columns)) + " |\n" for r in rows[:cap])
     more = f"\n_{len(rows) - cap} more row(s) not shown._\n" if len(rows) > cap else ""
     return head + body + more
 
