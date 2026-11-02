@@ -2,44 +2,55 @@
 
 ## What is the business challenge you are solving?
 
-Meridian Advisory (an illustrative $1.2B professional-services firm) runs procure-to-pay, order-to-cash and
-record-to-report for two legal entities (India and UK) on weekly ERP exports, an invoice inbox and spreadsheets.
-The CFO's problems are measurable:
+Every finance organisation runs its cash cycle through three processes: procure-to-pay (paying vendors),
+order-to-cash (collecting from customers) and record-to-report (tying both to the general ledger and closing the
+books). In most companies the three run on separate exports, inboxes and spreadsheets, so the CFO sees the cash
+position a week late and controls arrive after the money has moved. Meridian Advisory (an illustrative $1.2B
+professional-services firm with India and UK entities) is a typical case:
 
-- **Cost and speed of AP.** Only about a third of invoices are processed touchless; the rest are matched by hand at
-  about $9.40 each.
-- **Payment leakage.** Duplicate and tampered invoices are found after payment, because nothing compares the invoice
-  PDF with the ERP record before the payment run. Duplicates and overpayments cost about 0.1% of vendor spend.
-- **Slow, manual close.** The tie-out of the AR and AP sub-ledgers to the general ledger is a 5–10 day month-end
-  exercise in spreadsheets, and unexplained differences reach the auditor.
-- **Stale collections.** Collectors work from aging that is up to 7 days old, which keeps days sales outstanding high
-  and cash tied up.
-- **Uneven access control.** Finance data is shared as exports, so legal-entity restrictions and the masking of bank
-  and tax identifiers depend on who receives the file.
+- **Procure-to-pay: paying before checking.** The average AP team processes only 29% of invoices touchless
+  ([Ardent Partners, State of ePayables 2025](https://tradeshift.com/wp-content/uploads/2025/07/Ardent-Partners-State-of-ePayables-2025-Tradeshift.pdf);
+  best in class 51%); the rest cost about $9.40 each by hand
+  ([Ardent Partners, AP Metrics that Matter 2025](https://www.datocms-assets.com/80283/1744404602-ardent-partners-ap-metrics-that-matter-in-2025-pagero-final.pdf)).
+  Duplicate and tampered invoices are found after payment, because nothing compares the invoice PDF with the ERP
+  record before the payment run.
+- **Order-to-cash: collecting late.** Collectors chase customers from aging that is up to 7 days old, with no daily
+  priority list, which keeps days sales outstanding high and cash tied up.
+- **Record-to-report: closing by hand.** The AR and AP sub-ledgers are tied to the general ledger in spreadsheets over
+  a 5–10 day month end, and unexplained differences reach the auditor.
+- **No single view, uneven control.** The CFO cannot ask one question across vendors, customers and balances, and
+  finance data is shared as files, so legal-entity restrictions and the masking of bank and tax identifiers depend on
+  who receives the file.
 
-The ask is one governed view that pays only what is owed, explains every reconciling amount and surfaces only the
-exceptions that need a person.
+The ask is one governed control tower over the whole cash cycle that any finance organisation can run: pay only what
+is owed, collect faster, close with every difference explained, and let the CFO ask about any of it, with AI
+surfacing only the exceptions that need a person.
 
 ## How does your Databricks solution address this challenge?
 
-The Finance Operations Control Tower replaces the exports and spreadsheets with one governed flow:
+The Finance Operations Control Tower puts procure-to-pay, order-to-cash and record-to-report on one governed copy of
+finance data, with a control built into each pillar:
 
-- **Lakeflow Declarative Pipelines** ingest the ERP extracts and invoice PDFs with Auto Loader, apply 36 expectations,
-  quarantine duplicates and unbalanced journals, run the three-way match and build the P2P, O2C and R2R gold layer.
-- **AI Functions inside the pipeline** (`ai_parse_document`, `ai_extract`) read every invoice PDF. When the PDF
-  disagrees with the ERP on total, GSTIN or PO, the invoice is release-blocked and can never be paid touchless.
-  **MLflow** evaluates every build: 100% field accuracy on 200 PDFs and 3 of 3 tampered invoices caught, with no clean
-  invoice blocked.
-- The **general ledger is posted from the sub-ledgers**; the reconciliation shows AR and AP differences of ₹1.53 Cr
-  and ₹0.80 Cr, each fully explained by named documents whose journals are still in draft (₹0 unexplained), and the
-  trial balance balances in every period.
-- **Unity Catalog** applies a row filter by legal entity, masks on bank and tax fields, tags and lineage; the
-  **Databricks App** reads on behalf of the signed-in user, so a UK analyst sees only 109 UK invoices with masked bank
-  details while a controller sees all 550.
-- **Lakebase** serves the AP exception queue (a synced table from Gold) and stores approvals, call logs and chat; a
-  write-back job copies them into Unity Catalog. The **Genie Agent** answers finance questions in the app chat.
+- **One governed foundation.** Lakeflow Declarative Pipelines ingest the ERP extracts and invoice PDFs with Auto
+  Loader, apply 36 expectations, quarantine duplicates and unbalanced journals and build the P2P, O2C and R2R gold
+  layer. Unity Catalog applies a row filter by legal entity, masks on bank and tax fields, tags and lineage.
+- **Procure-to-pay: pay right.** Clean three-way matches are paid touchless. AI Functions inside the pipeline
+  (`ai_parse_document`, `ai_extract`) read every invoice PDF; when the PDF disagrees with the ERP on total, GSTIN or PO,
+  the invoice is release-blocked. MLflow evaluates every build (100% field accuracy on 200 PDFs; 3 of 3 tampered
+  invoices caught, no clean invoice blocked). Exceptions go to an AP queue served from Lakebase (a synced table) with
+  the reason, and approvals are written back.
+- **Order-to-cash: collect faster.** The app flags overdue receivables live and an AI summary (Foundation Model API)
+  names the customers to chase first; collectors log calls and promise-to-pay dates in Lakebase, and a write-back job
+  copies them into Unity Catalog.
+- **Record-to-report: close with confidence.** The general ledger is posted from the sub-ledgers. The reconciliation
+  shows AR and AP differences of ₹1.53 Cr and ₹0.80 Cr, each explained by named documents whose journals are still in
+  draft (₹0 unexplained), and the trial balance balances in every period.
+- **The CFO asks anything.** A Genie Agent over 13 governed tables answers questions across vendors, customers and
+  balances in the app chat. The app reads on behalf of the signed-in user, so a UK analyst sees only 109 UK invoices
+  with masked bank details while a controller sees all 550.
 
-Everything deploys from one Declarative Automation Bundle and `setup/setup.sh`; text evidence of each stage is in `evidence/`.
+AI never approves a payment; it blocks, ranks and explains, and a person decides. Everything deploys from one
+Declarative Automation Bundle and `setup/setup.sh`; text evidence of each stage is in `evidence/`.
 
 ## What AI tools did you use, and what was your workflow?
 
@@ -72,20 +83,25 @@ Everything deploys from one Declarative Automation Bundle and `setup/setup.sh`; 
 
 ## What are the business outcomes and impact?
 
-**Estimated value:** about $2.8M a year for the illustrative customer, about 11x an estimated $0.25M platform cost:
+**Estimated value:** about $2.8M a year for the illustrative customer, about 11x an estimated $0.25M platform cost,
+across all three pillars:
 
-- $1.3M working-capital carry on $16M of cash released by a 5-day DSO reduction
-- $0.7M AP processing cost (120K invoices from $9.40 to $3.50 each at 70% touchless)
-- $0.5M payment leakage blocked
-- $0.3M close effort
+- **Order-to-cash:** $1.3M working-capital carry on $16M of cash released by a 5-day DSO reduction
+- **Procure-to-pay:** $0.7M AP processing cost (120K invoices a year from $9.40 to $3.50 each at the 70% touchless
+  pilot target, against a 29% industry average and 51% best in class) and $0.5M payment leakage blocked
+- **Record-to-report:** $0.3M close effort from a daily tie-out instead of a 5–10 day month end
 
-**Proven on the build (synthetic data):**
+**Proven on the build (synthetic data, every figure traced to a query in `evidence/`):**
 
-- 34.4% touchless today (189 of 550 invoices)
-- 27 duplicates (₹26.8 Cr) stopped before payment
-- 3 of 3 tampered invoices blocked; one of them (INV000198, +7%) would otherwise have been paid touchless
-- 407 exceptions routed with a reason
-- Sub-ledgers tied to the GL with every difference explained
-- Per-user governance enforced in the app and Genie
+- **Procure-to-pay:** 34.4% touchless (189 of 550) on a deliberately exception-heavy test set; 3 of 3 tampered
+  invoices blocked, one of them (INV000198, +7%) otherwise payable touchless; 27 duplicates (₹26.8 Cr) stopped before
+  payment; 407 exceptions routed with a reason
+- **Order-to-cash:** ₹17.37 Cr open across 37 customers, 59-day DSO, 88.9% collection effectiveness, overdue items
+  flagged live and calls logged to Lakebase and Unity Catalog
+- **Record-to-report:** sub-ledgers tied to the GL with every difference explained (₹0 unexplained); trial balance
+  balanced in every period; five unbalanced journals kept out of the GL
+- **CFO view:** Genie answered 6 of 6 test questions across the three pillars, with per-user governance enforced in
+  the app and in Genie
 
-The proposed next step is a 10-week, AP-first pilot on one entity.
+The proposed next step is a 10-week pilot on one legal entity across all three pillars, measured on touchless rate
+(target 70%), days sales outstanding and tie-out time.

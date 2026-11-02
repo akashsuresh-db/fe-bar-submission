@@ -6,10 +6,17 @@ centre runs Procure-to-Pay (P2P), Order-to-Cash (O2C) and Record-to-Report (R2R)
 
 ## 1. Outcome first
 
-**The problem, in the buyer's KPIs.** Finance works from last week's ERP exports and spreadsheets. Invoices are
-keyed and matched by hand (a touchless rate of about a third), duplicate and tampered invoices are found after
-payment if at all, collections teams chase from stale aging lists, and the month-end tie-out of the sub-ledgers to
-the general ledger takes days of manual reconciliation.
+**The problem, in the buyer's KPIs.** The cash cycle runs through three processes that do not talk to each other,
+so the CFO sees the cash position a week late. In **procure-to-pay**, invoices are keyed and matched by hand (the
+average AP team is 29% touchless, best in class 51%) and duplicate or tampered invoices are found after payment, if at
+all. In **order-to-cash**, collectors chase customers from aging lists up to 7 days old. In **record-to-report**, the
+sub-ledgers are tied to the general ledger in spreadsheets over a 5–10 day month end. Nobody can ask one question
+across vendors, customers and balances.
+
+**The answer.** One governed control tower over the whole cash cycle: pay right (touchless match plus an AI release
+control), collect faster (overdue receivables flagged live and AI-prioritised, calls logged in Lakebase), close with
+confidence (GL posted from the sub-ledgers, every reconciling difference named) and let the CFO ask anything through
+a Genie Agent, with Unity Catalog governing every step.
 
 **The value case (estimated).** About **$2.8M a year** across four levers, about **11x** the estimated platform
 cost of $0.25M a year. A 5-day DSO reduction also releases **$16M of cash** once; its carrying value is one of the levers.
@@ -22,7 +29,7 @@ cost of $0.25M a year. A 5-day DSO reduction also releases **$16M of cash** once
 | Close effort | Three fewer close days a month for a 25-person finance team | $0.3M |
 | **Total** | Platform cost estimated at $0.25M a year at pilot scale | **$2.8M (11x)** |
 
-Invoice cost benchmark: Ardent Partners ePayables. All inputs are illustrative estimates for this customer profile.
+Benchmarks: Ardent Partners [State of ePayables 2025](https://tradeshift.com/wp-content/uploads/2025/07/Ardent-Partners-State-of-ePayables-2025-Tradeshift.pdf) (touchless) and [AP Metrics that Matter 2025](https://www.datocms-assets.com/80283/1744404602-ardent-partners-ap-metrics-that-matter-in-2025-pagero-final.pdf) ($9.40 per invoice). All inputs are illustrative estimates for this customer profile.
 
 **Proven on the build** (live results, `evidence/kpi_queries.md`):
 
