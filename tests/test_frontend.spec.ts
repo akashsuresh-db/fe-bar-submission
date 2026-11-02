@@ -191,7 +191,7 @@ const P2P_SSE_EVENTS = [
 ];
 
 const O2C_SSE_EVENTS = [
-  { type: "greeting", data: { role: "Collections Specialist", message: "AR portfolio: ₹25,000,000 outstanding" } },
+  { type: "greeting", data: { role: "Collections Specialist", message: "AR portfolio: $284.1K outstanding" } },
   {
     type: "collection", data: {
       o2c_invoice_id: "CINV001", invoice_number: "OINV-001",

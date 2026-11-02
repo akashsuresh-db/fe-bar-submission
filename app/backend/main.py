@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+from backend.currency import usd
 from backend import db
 from backend.streams import stream_p2p, stream_o2c, stream_r2r
 from backend.chat import stream_mas_agent, AGENT_ENDPOINT, select_route
@@ -232,10 +233,10 @@ async def verify_invoice(invoice_id: str):
         v = _ratio(inv_total, po_total)
         if v <= 0.05:
             checks.append({"id":1, "name":"Invoice ↔ PO total", "status":"PASS",
-                           "detail":f"₹{inv_total/1e7:.2f} Cr vs ₹{po_total/1e7:.2f} Cr (within 5%)"})
+                           "detail":f"{usd(inv_total)} vs {usd(po_total)} (within 5%)"})
         else:
             checks.append({"id":1, "name":"Invoice ↔ PO total", "status":"FAIL",
-                           "detail":f"₹{inv_total/1e7:.2f} Cr vs ₹{po_total/1e7:.2f} Cr ({v*100:.1f}% variance, threshold 5%)"})
+                           "detail":f"{usd(inv_total)} vs {usd(po_total)} ({v*100:.1f}% variance, threshold 5%)"})
     else:
         checks.append({"id":1, "name":"Invoice ↔ PO total", "status":"FAIL",
                        "detail":"no PO linked — cannot 3-way match"})
@@ -245,12 +246,12 @@ async def verify_invoice(invoice_id: str):
     if release_blocked:
         checks.append({"id":2, "name":"AI release control (PDF ↔ ERP total)", "status":"FAIL",
                        "detail":f"RELEASE BLOCKED — {r.get('block_reason') or 'PDF disagrees with ERP'}"
-                                + (f"; PDF ₹{ex_total:,.0f} vs ERP ₹{inv_total:,.0f}" if ex_total else "")})
+                                + (f"; PDF {usd(ex_total, exact=True)} vs ERP {usd(inv_total, exact=True)}" if ex_total else "")})
     elif ex_total:
         v = _ratio(ex_total, inv_total)
         status = "PASS" if v <= 0.01 else "FAIL"
         checks.append({"id":2, "name":"AI release control (PDF ↔ ERP total)", "status":status,
-                       "detail":f"PDF ₹{ex_total:,.0f} vs ERP ₹{inv_total:,.0f} ({v*100:.1f}% variance, tolerance 1%)"})
+                       "detail":f"PDF {usd(ex_total, exact=True)} vs ERP {usd(inv_total, exact=True)} ({v*100:.1f}% variance, tolerance 1%)"})
     else:
         checks.append({"id":2, "name":"AI release control (PDF ↔ ERP total)", "status":"WARN",
                        "detail":"no PDF on file / total not extracted"})
@@ -321,7 +322,7 @@ async def verify_invoice(invoice_id: str):
     dup_count = int((dup_rows or [{}])[0].get("dups", 0))
     if dup_count > 0:
         checks.append({"id":7, "name":"Duplicate payment check", "status":"FAIL",
-                       "detail":f"{dup_count} other invoice(s) from same vendor for ₹{inv_amt:,.0f} in last 90 days"})
+                       "detail":f"{dup_count} other invoice(s) from same vendor for {usd(inv_amt, exact=True)} in last 90 days"})
     else:
         checks.append({"id":7, "name":"Duplicate payment check", "status":"PASS",
                        "detail":"no duplicates in last 90 days"})
@@ -334,10 +335,10 @@ async def verify_invoice(invoice_id: str):
                        "detail":"reconciliation row for account 2000 not found"})
     elif ap["tied"]:
         checks.append({"id":8, "name":"AP sub-ledger ↔ GL tie-out", "status":"PASS",
-                       "detail":f"tied: Δ ₹{ap['delta']:,.0f} fully explained by {ap['reconciling_items_count']} reconciling item(s)"})
+                       "detail":f"tied: Δ {usd(ap['delta'])} fully explained by {ap['reconciling_items_count']} reconciling item(s)"})
     else:
         checks.append({"id":8, "name":"AP sub-ledger ↔ GL tie-out", "status":"WARN",
-                       "detail":f"unexplained Δ ₹{ap['unexplained_delta']:,.0f} on account 2000"})
+                       "detail":f"unexplained Δ {usd(ap['unexplained_delta'], exact=True)} on account 2000"})
 
     # Recommendation
     fail_count = sum(1 for c in checks if c["status"] == "FAIL")

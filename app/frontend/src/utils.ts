@@ -1,22 +1,30 @@
-/** Format INR currency. */
-export function formatINR(value: number | string | null | undefined): string {
+/** The build stores amounts in INR; the app shows them in US dollars at this fixed rate. */
+export const INR_PER_USD = 88;
+
+/** Format a US-dollar amount: $1.23M, $45.6K or $789. */
+export function formatUSD(value: number | string | null | undefined): string {
   if (value == null) return "---";
   const num = typeof value === "string" ? parseFloat(value) : value;
   if (isNaN(num)) return "---";
-  if (Math.abs(num) >= 1_00_00_000) {
-    return `${(num / 1_00_00_000).toFixed(2)} Cr`;
-  }
-  if (Math.abs(num) >= 1_00_000) {
-    return `${(num / 1_00_000).toFixed(2)} L`;
-  }
-  return num.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+  const sign = num < 0 ? "-" : "";
+  const abs = Math.abs(num);
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}$${abs.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 }
 
-/** Format INR with rupee sign. */
-export function inr(value: number | string | null | undefined): string {
-  const formatted = formatINR(value);
-  if (formatted === "---") return formatted;
-  return `\u20B9${formatted}`;
+/** Format an INR amount from the data layer as US dollars. */
+export function usd(value: number | string | null | undefined): string {
+  if (value == null) return "---";
+  const num = typeof value === "string" ? parseFloat(value) : value;
+  if (isNaN(num)) return "---";
+  return formatUSD(num / INR_PER_USD);
+}
+
+/** Format an INR amount as exact US dollars with cents. */
+export function usdExact(value: number | null | undefined): string {
+  if (value == null || isNaN(value)) return "—";
+  return `$${(value / INR_PER_USD).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 /** Format number with commas. */
@@ -24,7 +32,7 @@ export function formatNum(value: number | string | null | undefined): string {
   if (value == null) return "0";
   const num = typeof value === "string" ? parseFloat(value) : value;
   if (isNaN(num)) return "0";
-  return num.toLocaleString("en-IN");
+  return num.toLocaleString("en-US");
 }
 
 /** Status color mapping. */

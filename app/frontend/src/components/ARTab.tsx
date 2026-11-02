@@ -12,7 +12,7 @@ import GreetingBanner from "./GreetingBanner";
 import ExceptionDrawer from "./ExceptionDrawer";
 import SummaryCard from "./SummaryCard";
 import TopSummaryCard from "./TopSummaryCard";
-import { inr, formatNum, agingColor, dash } from "../utils";
+import { usd, formatNum, agingColor, dash } from "../utils";
 
 type O2CMetrics = {
   metrics: {
@@ -105,7 +105,7 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
 
       {/* KPI Strip */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <MetricCard label="AR Outstanding" value={dash(m?.total_outstanding, inr)} icon={<DollarSign className="w-4 h-4" />} />
+        <MetricCard label="AR Outstanding" value={dash(m?.total_outstanding, usd)} icon={<DollarSign className="w-4 h-4" />} />
         <MetricCard label="DSO" value={dash(m?.avg_dso, (v) => `${v} days`)} color={!m ? "text-text-muted" : m.avg_dso > 42 ? "text-db-amber" : "text-db-green"} sub="Target: 42 days" icon={<TrendingUp className="w-4 h-4" />} />
         <MetricCard label="CEI" value={dash(m?.cei, (v) => `${v}%`)} color="text-db-blue" icon={<CheckCircle2 className="w-4 h-4" />} />
         <MetricCard label="Overdue" value={dash(m?.overdue_count, formatNum)} color="text-db-red" icon={<Clock className="w-4 h-4" />} />
@@ -134,7 +134,7 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
           <div className="ml-auto glass-card px-3 py-1.5 flex items-center gap-2">
             <DollarSign className="w-3 h-3 text-db-green" />
             <span className="text-xs text-text-muted">Collected today:</span>
-            <span className="text-sm font-bold text-db-green tabular-nums">{inr(collectedToday)}</span>
+            <span className="text-sm font-bold text-db-green tabular-nums">{usd(collectedToday)}</span>
           </div>
         )}
       </div>
@@ -207,9 +207,9 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
                       <div className="flex items-center gap-2 flex-shrink-0">
                         <span className="text-sm font-semibold tabular-nums">
                           {isPayment ? (
-                            <span className="text-db-green">{inr(d.amount_collected_inr)}</span>
+                            <span className="text-db-green">{usd(d.amount_collected_inr)}</span>
                           ) : (
-                            inr(d.balance_outstanding)
+                            usd(d.balance_outstanding)
                           )}
                         </span>
                         <span className={`text-xs font-medium px-2 py-0.5 rounded ${
@@ -274,7 +274,7 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
                   <YAxis hide />
                   <Tooltip
                     contentStyle={{ background: "#111d2e", border: "1px solid #1e3050", borderRadius: 8, fontSize: 12 }}
-                    formatter={(val: number) => [inr(val), "Amount"]}
+                    formatter={(val: number) => [usd(val), "Amount"]}
                     labelStyle={{ color: "#8B949E" }}
                   />
                   <Bar dataKey="amount" radius={[4, 4, 0, 0]}>
@@ -311,8 +311,8 @@ export default function ARTab({ userName = "User", onNotify }: Props) {
                       />
                     </div>
                     <div className="flex justify-between text-[10px] text-text-muted mt-1">
-                      <span>Outstanding: {inr(c.outstanding)}</span>
-                      <span>Limit: {inr(c.credit_limit)}</span>
+                      <span>Outstanding: {usd(c.outstanding)}</span>
+                      <span>Limit: {usd(c.credit_limit)}</span>
                     </div>
                   </div>
                 ))}

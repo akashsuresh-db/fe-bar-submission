@@ -13,7 +13,7 @@ import ExceptionDrawer from "./ExceptionDrawer";
 import InvoiceDrawer from "./InvoiceDrawer";
 import SummaryCard from "./SummaryCard";
 import TopSummaryCard from "./TopSummaryCard";
-import { inr, matchStatusColor, matchStatusBg, matchStatusLabel, formatNum, dash } from "../utils";
+import { usd, matchStatusColor, matchStatusBg, matchStatusLabel, formatNum, dash } from "../utils";
 
 type P2PMetrics = {
   metrics: {
@@ -142,7 +142,7 @@ export default function APTab({ userName = "User", onNotify }: Props) {
         <MetricCard label="Touchless Rate" value={dash(m?.touchless_rate, (v) => `${v}%`)} color="text-db-blue"
           sub={m?.release_blocked !== undefined ? `excl. ${m.release_blocked} blocked: PDF ≠ ERP` : undefined}
           icon={<Shield className="w-4 h-4" />} />
-        <MetricCard label="Overdue" value={dash(m?.overdue_count, formatNum)} color="text-db-amber" sub={m ? inr(m.overdue_amount) : undefined} icon={<Clock className="w-4 h-4" />} />
+        <MetricCard label="Overdue" value={dash(m?.overdue_count, formatNum)} color="text-db-amber" sub={m ? usd(m.overdue_amount) : undefined} icon={<Clock className="w-4 h-4" />} />
         <MetricCard label="Avg Aging" value={dash(m?.avg_aging_days, (v) => `${v} days`)} color="text-text-primary" icon={<ArrowUpRight className="w-4 h-4" />} />
       </div>
 
@@ -243,7 +243,7 @@ export default function APTab({ userName = "User", onNotify }: Props) {
                         </span>
                       </div>
                       <div className="flex items-center gap-3 flex-shrink-0">
-                        <span className="text-sm font-semibold tabular-nums">{inr(d.invoice_total_inr)}</span>
+                        <span className="text-sm font-semibold tabular-nums">{usd(d.invoice_total_inr)}</span>
                         {isActioned ? (
                           <span className="text-xs font-medium px-2 py-0.5 rounded text-db-green">
                             Actioned
@@ -347,7 +347,7 @@ export default function APTab({ userName = "User", onNotify }: Props) {
                     </div>
                     <div className="text-xs text-text-muted mt-1 truncate">
                       {(exc.data.vendor_name || exc.data.customer_name || exc.data.invoice_id) as string}
-                      {exc.data.amount && <span className="ml-1 text-text-secondary">{inr(exc.data.amount as number)}</span>}
+                      {exc.data.amount && <span className="ml-1 text-text-secondary">{usd(exc.data.amount as number)}</span>}
                     </div>
                   </motion.div>
                 ))}
@@ -371,7 +371,7 @@ export default function APTab({ userName = "User", onNotify }: Props) {
               <div className="space-y-3">
                 <div className="flex justify-between text-sm">
                   <span className="text-text-muted">Total Paid</span>
-                  <span className="font-semibold">{inr(pr.total_paid)}</span>
+                  <span className="font-semibold">{usd(pr.total_paid)}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-text-muted">Avg DPO</span>

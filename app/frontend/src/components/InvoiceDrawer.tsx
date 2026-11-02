@@ -7,6 +7,7 @@
  *
  * Used by AIChatPanel (invoice ID clicks in chat) and APTab (exception panel).
  */
+import { usdExact } from "../utils";
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { FileText, X, AlertTriangle, CheckCircle, XCircle, Download, Loader2 } from "lucide-react";
@@ -88,8 +89,7 @@ function InvoicePanel({
       .finally(() => setLoading(false));
   }, [invoiceId]);
 
-  const fmt = (n: number) =>
-    n ? `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—";
+  const fmt = (n: number) => (n ? usdExact(n) : "—");
 
   return (
     <div className="flex flex-col h-full bg-bg-card">

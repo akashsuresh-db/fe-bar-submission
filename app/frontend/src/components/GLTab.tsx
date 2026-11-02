@@ -17,7 +17,7 @@ import GLReconCard from "./GLReconCard";
 // Keeps the demo focused: AR, Inventory, PPE, AP, LT Debt, Retained Earnings,
 // Service Revenue, Salaries, IT Expense — one per major TB section.
 const DEMO_ACCOUNTS = new Set(["1100", "1200", "1500", "2000", "2500", "3100", "4100", "5100", "5500"]);
-import { inr, formatNum, dash } from "../utils";
+import { usd, formatNum, dash } from "../utils";
 
 type R2RMetrics = {
   metrics: {
@@ -79,8 +79,8 @@ export default function GLTab({ userName = "User" }: Props) {
         <MetricCard label="Journal Entries" value={dash(m?.total_jes, formatNum)} icon={<BookOpen className="w-4 h-4" />} />
         <MetricCard label="Posted" value={dash(m?.posted, formatNum)} color="text-db-green" icon={<CheckCircle2 className="w-4 h-4" />} />
         <MetricCard label="Pending" value={dash(m?.pending, formatNum)} color="text-db-amber" icon={<ClipboardCheck className="w-4 h-4" />} />
-        <MetricCard label="TB Debits" value={dash(m?.tb_total_debit, inr)} color="text-text-primary" />
-        <MetricCard label="TB Credits" value={dash(m?.tb_total_credit, inr)} color="text-text-primary" />
+        <MetricCard label="TB Debits" value={dash(m?.tb_total_debit, usd)} color="text-text-primary" />
+        <MetricCard label="TB Credits" value={dash(m?.tb_total_credit, usd)} color="text-text-primary" />
         <MetricCard
           label="TB Status"
           value={dash(m?.is_balanced, (b) => (b ? "BALANCED" : "IMBALANCED"))}
@@ -169,15 +169,15 @@ export default function GLTab({ userName = "User" }: Props) {
                         </td>
                         <td className="px-3 py-2 text-xs text-text-muted">{row.account_type}</td>
                         <td className="px-3 py-2 text-right font-mono text-xs tabular-nums">
-                          {row.debit > 0 ? inr(row.debit) : ""}
+                          {row.debit > 0 ? usd(row.debit) : ""}
                         </td>
                         <td className="px-3 py-2 text-right font-mono text-xs tabular-nums">
-                          {row.credit > 0 ? inr(row.credit) : ""}
+                          {row.credit > 0 ? usd(row.credit) : ""}
                         </td>
                         <td className={`px-3 py-2 text-right font-mono text-xs font-semibold tabular-nums ${
                           row.balance_type === "DR" ? "text-db-green" : "text-db-blue"
                         }`}>
-                          {inr(row.balance)} {row.balance_type}
+                          {usd(row.balance)} {row.balance_type}
                         </td>
                       </motion.tr>
                     ))}
@@ -186,10 +186,10 @@ export default function GLTab({ userName = "User" }: Props) {
                     <tfoot className="sticky bottom-0 bg-bg-panel border-t-2 border-border-glow">
                       <tr className="font-semibold text-sm">
                         <td className="px-3 py-2" colSpan={2}>Total</td>
-                        <td className="px-3 py-2 text-right font-mono tabular-nums">{inr(m.tb_total_debit)}</td>
-                        <td className="px-3 py-2 text-right font-mono tabular-nums">{inr(m.tb_total_credit)}</td>
+                        <td className="px-3 py-2 text-right font-mono tabular-nums">{usd(m.tb_total_debit)}</td>
+                        <td className="px-3 py-2 text-right font-mono tabular-nums">{usd(m.tb_total_credit)}</td>
                         <td className={`px-3 py-2 text-right font-mono tabular-nums ${m.is_balanced ? "text-db-green" : "text-db-red"}`}>
-                          {m.is_balanced ? "BALANCED" : `Diff: ${inr(m.tb_imbalance)}`}
+                          {m.is_balanced ? "BALANCED" : `Diff: ${usd(m.tb_imbalance)}`}
                         </td>
                       </tr>
                     </tfoot>
@@ -252,8 +252,8 @@ export default function GLTab({ userName = "User" }: Props) {
                             <div key={li} className="flex items-center text-xs text-text-muted gap-2">
                               <span className="font-mono w-10 text-right">{l.account_code as string}</span>
                               <span className="flex-1 truncate">{l.account_name as string}</span>
-                              {(l.debit as number) > 0 && <span className="text-db-green tabular-nums">{inr(l.debit as number)} DR</span>}
-                              {(l.credit as number) > 0 && <span className="text-db-blue tabular-nums">{inr(l.credit as number)} CR</span>}
+                              {(l.debit as number) > 0 && <span className="text-db-green tabular-nums">{usd(l.debit as number)} DR</span>}
+                              {(l.credit as number) > 0 && <span className="text-db-blue tabular-nums">{usd(l.credit as number)} CR</span>}
                             </div>
                           ))}
                           {lines.length > 3 && (
@@ -323,11 +323,11 @@ export default function GLTab({ userName = "User" }: Props) {
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="text-text-muted">Debits</span>
-                  <span className="font-mono tabular-nums text-db-green">{inr(tbLive.running_debit as number)}</span>
+                  <span className="font-mono tabular-nums text-db-green">{usd(tbLive.running_debit as number)}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-text-muted">Credits</span>
-                  <span className="font-mono tabular-nums text-db-blue">{inr(tbLive.running_credit as number)}</span>
+                  <span className="font-mono tabular-nums text-db-blue">{usd(tbLive.running_credit as number)}</span>
                 </div>
                 <div className="border-t border-border-subtle pt-2 flex justify-between text-sm font-semibold">
                   <span>Status</span>
@@ -362,7 +362,7 @@ export default function GLTab({ userName = "User" }: Props) {
                   >
                     <div className="flex justify-between text-xs">
                       <span className="text-text-primary font-mono">{(exc.data as Record<string, unknown>).je_number as string}</span>
-                      <span className="text-db-amber font-semibold">{inr((exc.data as Record<string, unknown>).total_debit as number)}</span>
+                      <span className="text-db-amber font-semibold">{usd((exc.data as Record<string, unknown>).total_debit as number)}</span>
                     </div>
                   </div>
                 ))}

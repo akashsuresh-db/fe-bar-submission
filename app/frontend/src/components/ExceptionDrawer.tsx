@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, AlertTriangle, ShieldAlert, Info, FileText, ShieldCheck } from "lucide-react";
-import { severityBadge, inr } from "../utils";
+import { severityBadge, usd } from "../utils";
 import type { SSEEvent } from "../hooks/useSSE";
 import AIvsERPCard from "./AIvsERPCard";
 
@@ -111,7 +111,7 @@ export default function ExceptionDrawer({ exception, onClose, onViewInvoice }: P
                     )}
                     {exception.data.amount && (
                       <div className="text-lg font-bold text-text-primary mt-2">
-                        {inr(exception.data.amount as number)}
+                        {usd(exception.data.amount as number)}
                       </div>
                     )}
                     {onViewInvoice && (
@@ -171,11 +171,11 @@ export default function ExceptionDrawer({ exception, onClose, onViewInvoice }: P
                       </div>
                       <div>
                         <span className="text-text-muted">Debit:</span>{" "}
-                        <span className="text-db-green">{inr(exception.data.total_debit as number)}</span>
+                        <span className="text-db-green">{usd(exception.data.total_debit as number)}</span>
                       </div>
                       <div>
                         <span className="text-text-muted">Credit:</span>{" "}
-                        <span className="text-db-red">{inr(exception.data.total_credit as number)}</span>
+                        <span className="text-db-red">{usd(exception.data.total_credit as number)}</span>
                       </div>
                     </div>
                   </div>

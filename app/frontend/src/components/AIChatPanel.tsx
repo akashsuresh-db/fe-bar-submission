@@ -7,7 +7,7 @@ import {
   History, Plus, Clock, MessageSquare, X,
   FileText,
 } from "lucide-react";
-import { inr } from "../utils";
+import { usd, formatUSD } from "../utils";
 import InvoiceDrawer from "./InvoiceDrawer";
 
 // ─── Types ───────────────────────────────────────────────────
@@ -87,11 +87,11 @@ const SUGGESTIONS: Record<string, string[]> = {
   O2C: [
     "Which customers have the highest overdue amounts?",
     "What is our current DSO?",
-    "Show customers with overdue amounts above 1 crore",
+    "Show customers with overdue amounts above $100K",
   ],
   R2R: [
     "Are there any unreconciled accounts in the trial balance?",
-    "Show journal entries above 50 lakhs",
+    "Show journal entries above $50K",
     "What is the expense breakdown by department?",
   ],
 };
@@ -951,7 +951,7 @@ function DataTable({ columns, rows }: { columns: string[]; rows: Record<string, 
               <tr key={ri} className={`border-b border-border-subtle/40 ${ri % 2 === 0 ? "" : "bg-bg-card/30"}`}>
                 {columns.map((col) => (
                   <td key={col} className="px-3 py-2 text-text-secondary whitespace-nowrap">
-                    {formatCell(row[col])}
+                    {formatCell(col, row[col])}
                   </td>
                 ))}
               </tr>
@@ -963,9 +963,11 @@ function DataTable({ columns, rows }: { columns: string[]; rows: Record<string, 
   );
 }
 
-function formatCell(val: string | null | undefined): string {
+function formatCell(col: string, val: string | null | undefined): string {
   if (val == null) return "—";
   const num = parseFloat(val);
-  if (!isNaN(num) && num > 10000) return inr(num);
+  // Columns ending in _usd are already converted in SQL; other large amounts are INR from the data layer.
+  if (!isNaN(num) && /_usd$/i.test(col)) return formatUSD(num);
+  if (!isNaN(num) && num > 10000) return usd(num);
   return val;
 }

@@ -9,6 +9,7 @@ import asyncio
 import json
 import random  # cosmetic timing jitter only
 from typing import AsyncGenerator
+from backend.currency import usd
 from backend import db
 
 
@@ -39,7 +40,7 @@ def _detect_p2p_exceptions(inv: dict) -> list[dict]:
     if _is_true(inv.get("release_blocked")):
         erp = float(inv.get("invoice_total_inr", 0) or 0)
         pdf = inv.get("ai_extracted_amount")
-        detail = f" (PDF INR {float(pdf):,.0f} vs ERP INR {erp:,.0f})" if pdf is not None else ""
+        detail = f" (PDF {usd(float(pdf), exact=True)} vs ERP {usd(erp, exact=True)})" if pdf is not None else ""
         exceptions.append({
             "type": "quarantine",
             "rule": "release_blocked",
@@ -98,7 +99,7 @@ def _detect_o2c_exceptions(col: dict) -> list[dict]:
             "type": "quarantine",
             "rule": "written_off",
             "severity": "critical",
-            "reason": f"Invoice written off — INR {outstanding:,.0f} unrecoverable",
+            "reason": f"Invoice written off — {usd(outstanding)} unrecoverable",
             "resolution": "Review with Credit Manager for bad debt provisioning.",
         })
     elif days_overdue > 90:
@@ -106,7 +107,7 @@ def _detect_o2c_exceptions(col: dict) -> list[dict]:
             "type": "quarantine",
             "rule": "critical_overdue",
             "severity": "critical",
-            "reason": f"Invoice is {days_overdue} days overdue — INR {outstanding:,.0f} at risk",
+            "reason": f"Invoice is {days_overdue} days overdue — {usd(outstanding)} at risk",
             "resolution": "Escalate to Credit Manager. Consider legal collection action.",
         })
     elif days_overdue > 60:
@@ -122,7 +123,7 @@ def _detect_o2c_exceptions(col: dict) -> list[dict]:
             "type": "exception",
             "rule": "high_value_outstanding",
             "severity": "high",
-            "reason": f"High-value outstanding: INR {outstanding:,.0f}",
+            "reason": f"High-value outstanding: {usd(outstanding)}",
             "resolution": "Assign dedicated collection follow-up.",
         })
     return exceptions
@@ -140,7 +141,7 @@ def _detect_r2r_exceptions(je: dict, je_lines: list[dict]) -> list[dict]:
             "type": "quarantine",
             "rule": "je_balanced",
             "severity": "critical",
-            "reason": f"Journal entry is UNBALANCED — Debit: INR {total_debit:,.2f}, Credit: INR {total_credit:,.2f}, Difference: INR {diff:,.2f}",
+            "reason": f"Journal entry is UNBALANCED — Debit: {usd(total_debit, exact=True)}, Credit: {usd(total_credit, exact=True)}, Difference: {usd(diff, exact=True)}",
             "resolution": f"Review entry posted by {je.get('posted_by', 'Unknown')}. Correct the imbalance before period close.",
         })
     if total_debit > 5_000_000:
@@ -148,7 +149,7 @@ def _detect_r2r_exceptions(je: dict, je_lines: list[dict]) -> list[dict]:
             "type": "exception",
             "rule": "high_value_je",
             "severity": "medium",
-            "reason": f"High-value journal entry: INR {total_debit:,.0f} — requires controller approval",
+            "reason": f"High-value journal entry: {usd(total_debit)} — requires controller approval",
             "resolution": "Route to Vikram (Financial Controller) for sign-off.",
         })
     return exceptions
@@ -182,7 +183,7 @@ async def stream_p2p() -> AsyncGenerator[str, None]:
         "data": {
             "persona": "",
             "role": "AP Operations Lead",
-            "message": f"{total} invoices queued today.\n  {exceptions_count} require your attention: exceptions & mismatches\n  {overdue_count} overdue invoices flagged\nTotal value in queue: INR {total_amount:,.0f}",
+            "message": f"{total} invoices queued today.\n  {exceptions_count} require your attention: exceptions & mismatches\n  {overdue_count} overdue invoices flagged\nTotal value in queue: {usd(total_amount)}",
         }
     })
     await asyncio.sleep(0.3)
@@ -261,7 +262,7 @@ async def stream_o2c() -> AsyncGenerator[str, None]:
         "data": {
             "persona": "",
             "role": "Collections Specialist",
-            "message": f"AR portfolio: INR {total_outstanding:,.0f} outstanding\n  {len(overdue)} overdue accounts requiring action\n  Priority calls today: {min(len(overdue), 12)} accounts",
+            "message": f"AR portfolio: {usd(total_outstanding)} outstanding\n  {len(overdue)} overdue accounts requiring action\n  Priority calls today: {min(len(overdue), 12)} accounts",
             "buckets": {k: round(v, 0) for k, v in buckets.items()},
         }
     })
@@ -314,7 +315,7 @@ async def stream_o2c() -> AsyncGenerator[str, None]:
             "processed": processed,
             "collected_today": collected_today,
             "exceptions": exceptions_found,
-            "message": f"Today's collection run: {processed} accounts reviewed. INR {collected_today:,.0f} cash applied. {exceptions_found} exceptions flagged for follow-up."
+            "message": f"Today's collection run: {processed} accounts reviewed. {usd(collected_today)} cash applied. {exceptions_found} exceptions flagged for follow-up."
         }
     })
 

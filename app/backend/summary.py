@@ -51,12 +51,12 @@ SELECT
   (SELECT COUNT(*) FROM inv WHERE match_status = 'THREE_WAY_MATCHED' AND NOT COALESCE(release_blocked, false)) AS touchless,
   (SELECT COUNT(*) FROM inv WHERE COALESCE(release_blocked, false)) AS release_blocked,
   (SELECT COUNT(*) FROM inv WHERE is_overdue) AS overdue_count,
-  (SELECT ROUND(SUM(invoice_total_inr)/1e7, 2) FROM inv WHERE is_overdue) AS overdue_value_cr,
+  (SELECT ROUND(SUM(invoice_total_inr)/88/1e6, 2) FROM inv WHERE is_overdue) AS overdue_value_usd_m,
   (SELECT to_json(collect_list(named_struct('type', exception_type, 'count', n))) FROM ex) AS exceptions_json,
   (SELECT to_json(collect_list(named_struct(
             'vendor', vendor_name,
             'overdue_count', overdue_count,
-            'overdue_value_cr', ROUND(overdue_value/1e7, 2)
+            'overdue_value_usd_m', ROUND(overdue_value/88/1e6, 2)
           ))) FROM top_vendors) AS top_vendors_json,
   (SELECT to_json(collect_list(named_struct(
             'vendor', vendor_name, 'mismatches', mismatches
@@ -81,21 +81,21 @@ top_customers AS (
    LIMIT 3
 ),
 aging AS (
-  SELECT aging_bucket, ROUND(SUM(balance_outstanding)/1e7, 2) AS bucket_cr
+  SELECT aging_bucket, ROUND(SUM(balance_outstanding)/88/1e6, 2) AS bucket_usd_m
     FROM col WHERE balance_outstanding > 0 GROUP BY aging_bucket
 )
 SELECT
   (SELECT COUNT(DISTINCT customer_id) FROM overdue) AS overdue_customers,
-  (SELECT ROUND(SUM(balance_outstanding)/1e7, 2) FROM col WHERE balance_outstanding > 0) AS total_outstanding_cr,
+  (SELECT ROUND(SUM(balance_outstanding)/88/1e6, 2) FROM col WHERE balance_outstanding > 0) AS total_outstanding_usd_m,
   (SELECT ROUND(AVG(days_outstanding), 1) FROM overdue) AS avg_days_outstanding,
   (SELECT to_json(collect_list(named_struct(
             'customer', customer_name,
-            'outstanding_cr', ROUND(outstanding/1e7, 2),
+            'outstanding_usd_m', ROUND(outstanding/88/1e6, 2),
             'overdue_invoices', overdue_invoices,
             'max_days_outstanding', max_days_outstanding
           ))) FROM top_customers) AS top_customers_json,
   (SELECT to_json(collect_list(named_struct(
-            'bucket', aging_bucket, 'value_cr', bucket_cr
+            'bucket', aging_bucket, 'value_usd_m', bucket_usd_m
           ))) FROM aging) AS aging_json
 """
 
@@ -115,7 +115,7 @@ unbalanced AS (
    ORDER BY diff DESC LIMIT 3
 ),
 top_accounts AS (
-  SELECT account_name, ROUND(SUM(closing_balance_inr)/1e7, 2) AS balance_cr
+  SELECT account_name, ROUND(SUM(closing_balance_inr)/88/1e6, 2) AS balance_usd_m
     FROM tb
    WHERE account_type = 'Expense'
    GROUP BY account_name
@@ -125,14 +125,14 @@ top_accounts AS (
 SELECT
   (SELECT COUNT(DISTINCT je_id) FROM gl) AS total_je,
   (SELECT COUNT(*) FROM unbalanced) AS unbalanced_count,
-  (SELECT ROUND(SUM(diff)/1e5, 2) FROM unbalanced) AS unbalanced_value_l,
+  (SELECT ROUND(SUM(diff)/88/1e3, 1) FROM unbalanced) AS unbalanced_value_usd_k,
   (SELECT to_json(collect_list(named_struct(
-            'je_id', je_id, 'difference', diff
+            'je_id', je_id, 'difference_usd', ROUND(diff/88, 2)
           ))) FROM unbalanced) AS top_unbalanced_json,
-  (SELECT ROUND(SUM(CASE WHEN account_type = 'Asset'     THEN closing_balance_inr END)/1e7, 2) FROM tb) AS total_assets_cr,
-  (SELECT ROUND(SUM(CASE WHEN account_type = 'Liability' THEN closing_balance_inr END)/1e7, 2) FROM tb) AS total_liabilities_cr,
+  (SELECT ROUND(SUM(CASE WHEN account_type = 'Asset'     THEN closing_balance_inr END)/88/1e6, 2) FROM tb) AS total_assets_usd_m,
+  (SELECT ROUND(SUM(CASE WHEN account_type = 'Liability' THEN closing_balance_inr END)/88/1e6, 2) FROM tb) AS total_liabilities_usd_m,
   (SELECT to_json(collect_list(named_struct(
-            'account', account_name, 'balance_cr', balance_cr
+            'account', account_name, 'balance_usd_m', balance_usd_m
           ))) FROM top_accounts) AS top_expenses_json
 """
 
@@ -172,7 +172,7 @@ Hard formatting rules — these are constraints, not suggestions:
 - Output exactly 3 to 4 bullet points, no more
 - Each bullet starts with a dash and a space ("- ")
 - Each bullet is ≤ 14 words
-- Use ₹X Cr for currency (crores)
+- Amounts in the signals are already in US dollars (_usd_m = millions, _usd_k = thousands); write them as $X.XM or $XK
 - To bold a name use EXACTLY this pattern with both delimiters present: **Name Here**
   Wrong: Name Here**         (closing without opening — never do this)
   Wrong: **Name Here          (opening without closing — never do this)

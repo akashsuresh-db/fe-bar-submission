@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { CheckCircle2, AlertTriangle, ArrowLeftRight, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
-import { inr } from "../utils";
+import { usd } from "../utils";
 
 type ReconItem = {
   document_id: string;
@@ -31,7 +31,7 @@ type ReconRow = {
  * Sub-ledger ↔ GL reconciliation at the GL cut-off (/api/recon).
  * Three numbers per control account: sub-ledger, GL, and the documented
  * reconciling items that explain the difference. "Tied" is shown only when the
- * UNEXPLAINED delta is zero (|Δ| < ₹1).
+ * UNEXPLAINED delta is zero (|Δ| below one rupee).
  */
 export default function GLReconCard() {
   const [rows, setRows] = useState<ReconRow[] | null>(null);
@@ -137,14 +137,14 @@ export default function GLReconCard() {
                       <span className="font-mono text-text-secondary mr-1.5">{r.account_code}</span>
                       {r.account_name}
                     </td>
-                    <td className="text-right tabular-nums">{inr(r.subledger_amount)}</td>
-                    <td className="text-right tabular-nums">{inr(r.gl_amount)}</td>
+                    <td className="text-right tabular-nums">{usd(r.subledger_amount)}</td>
+                    <td className="text-right tabular-nums">{usd(r.gl_amount)}</td>
                     <td className="text-right tabular-nums" data-testid={`recon-explained-${r.account_code}`}>
-                      {inr(r.reconciling_items_amount)}
+                      {usd(r.reconciling_items_amount)}
                       <span className="ml-1 text-[9px] text-text-muted">({r.reconciling_items_count})</span>
                     </td>
                     <td className={`text-right tabular-nums ${tied ? "text-db-green" : "text-db-red font-semibold"}`}>
-                      {tied ? "₹0" : inr(r.unexplained_delta)}
+                      {tied ? "$0" : usd(r.unexplained_delta)}
                     </td>
                     <td className="text-center">
                       {tied ? (
@@ -162,7 +162,7 @@ export default function GLReconCard() {
                           {it.document_type} — {it.reason}
                           {it.gl_je_id ? ` (GL: ${it.gl_je_id}${it.gl_je_status ? `, ${it.gl_je_status}` : ""})` : ""}
                         </td>
-                        <td className="text-right tabular-nums">{inr(it.amount)}</td>
+                        <td className="text-right tabular-nums">{usd(it.amount)}</td>
                         <td />
                       </tr>
                     ))}

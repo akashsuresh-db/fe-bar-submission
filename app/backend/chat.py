@@ -338,7 +338,7 @@ async def stream_sql_agent(question: str, active_tab: str = "P2P",
         {"role": "system", "content":
             "You are a finance operations analyst. Given the user's question and the SQL result rows "
             "(JSON), write a concise, executive answer. Lead with the direct answer, then a compact "
-            "markdown table of the most relevant rows (cap ~10 rows, format INR amounts readably). "
+            "markdown table of the most relevant rows (cap ~10 rows). Amounts in the rows are INR unless the column name ends in _usd; present every amount in US dollars, converting INR at 88 per dollar ($X.XM or $XK). "
             "If there are no rows, say so plainly. Do not show the SQL."},
         {"role": "user", "content":
             f"Question: {question}\n\nSQL used:\n{sql}\n\nRows (JSON):\n{json.dumps(preview, default=str)[:6000]}"},
