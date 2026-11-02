@@ -1,11 +1,28 @@
 # FE BAR submission answers
 
+## What is the business challenge you are solving?
+
+Meridian Advisory (an illustrative $1.2B professional-services firm) runs procure-to-pay, order-to-cash and
+record-to-report for two legal entities (India and UK) on weekly ERP exports, an invoice inbox and spreadsheets.
+The CFO's problems are measurable:
+
+- **Cost and speed of AP.** Only about a third of invoices are processed touchless; the rest are matched by hand at
+  about $9.40 each.
+- **Payment leakage.** Duplicate and tampered invoices are found after payment, because nothing compares the invoice
+  PDF with the ERP record before the payment run. Duplicates and overpayments cost about 0.1% of vendor spend.
+- **Slow, manual close.** The tie-out of the AR and AP sub-ledgers to the general ledger is a 5–10 day month-end
+  exercise in spreadsheets, and unexplained differences reach the auditor.
+- **Stale collections.** Collectors work from aging that is up to 7 days old, which keeps days sales outstanding high
+  and cash tied up.
+- **Uneven access control.** Finance data is shared as exports, so legal-entity restrictions and the masking of bank
+  and tax identifiers depend on who receives the file.
+
+The ask is one governed view that pays only what is owed, explains every reconciling amount and surfaces only the
+exceptions that need a person.
+
 ## How does your Databricks solution address this challenge?
 
-Meridian Advisory (an illustrative $1.2B professional-services firm) runs P2P, O2C and R2R for two legal entities from
-weekly ERP exports and spreadsheets: about a third of invoices are processed touchless, duplicates and tampered
-invoices are found after payment, collections work from stale aging, and the month-end tie-out of sub-ledgers to the
-general ledger is manual. The Finance Operations Control Tower replaces this with one governed flow:
+The Finance Operations Control Tower replaces the exports and spreadsheets with one governed flow:
 
 - **Lakeflow Declarative Pipelines** ingest the ERP extracts and invoice PDFs with Auto Loader, apply 36 expectations,
   quarantine duplicates and unbalanced journals, run the three-way match and build the P2P, O2C and R2R gold layer.
@@ -22,7 +39,7 @@ general ledger is manual. The Finance Operations Control Tower replaces this wit
 - **Lakebase** serves the AP exception queue (a synced table from Gold) and stores approvals, call logs and chat; a
   write-back job copies them into Unity Catalog. The **Genie Agent** answers finance questions in the app chat.
 
-Everything deploys from one Asset Bundle and `setup/setup.sh`; text evidence of each stage is in `evidence/`.
+Everything deploys from one Declarative Automation Bundle and `setup/setup.sh`; text evidence of each stage is in `evidence/`.
 
 ## What AI tools did you use, and what was your workflow?
 
